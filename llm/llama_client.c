@@ -161,22 +161,26 @@ int llama_generate(const char *host, int port,
                    const char *prompt,
                    char *response_buf, int buf_size) {
     int prompt_len = (int)strlen(prompt);
-    printf("[llama] Sending prompt (%d chars) ...\n", prompt_len);
+    printf("[llama] Sending prompt (%d chars) via /v1/chat/completions ...\n",
+           prompt_len);
     fflush(stdout);
 
     char *esc_prompt = (char *)malloc((size_t)prompt_len * 2 + 16);
     if (!esc_prompt) return -1;
     json_escape_str(prompt, esc_prompt, prompt_len * 2 + 16);
 
-    int body_cap = (int)strlen(esc_prompt) + 256;
+    /*  Use the OpenAI-compatible chat endpoint so reasoning models apply
+     *  their chat template and thinking capabilities properly. */
+    int body_cap = (int)strlen(esc_prompt) + 512;
     char *json_body = (char *)malloc((size_t)body_cap);
     if (!json_body) { free(esc_prompt); return -1; }
     int body_len = snprintf(json_body, (size_t)body_cap,
-        "{\"prompt\":\"%s\",\"n_predict\":4096,\"stream\":false}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],"
+        "\"max_tokens\":4096,\"stream\":false}",
         esc_prompt);
     free(esc_prompt);
 
-    printf("[llama] Connecting to %s:%d for generation ...\n", host, port);
+    printf("[llama] Connecting to %s:%d ...\n", host, port);
     fflush(stdout);
 
     int sock = tcp_connect(host, port, CONNECT_TIMEOUT);
@@ -189,7 +193,7 @@ int llama_generate(const char *host, int port,
 
     char header[512];
     snprintf(header, sizeof(header),
-             "POST /completion HTTP/1.0\r\n"
+             "POST /v1/chat/completions HTTP/1.0\r\n"
              "Host: %s:%d\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %d\r\n"
@@ -208,15 +212,31 @@ int llama_generate(const char *host, int port,
 
     int bytes = tcp_recv_all(sock, GENERATE_TIMEOUT, resp, HTTP_BUF_SIZE);
     close(sock);
-    printf("[llama] Received %d bytes from /completion\n", bytes);
+    printf("[llama] Received %d bytes\n", bytes);
     fflush(stdout);
 
+    /* OpenAI chat response: {"choices":[{"message":{"content":"..."}}]} */
     const char *body = http_body(resp);
-    bool ok = json_get_string(body, "content", response_buf, buf_size);
+
+    /* The "content" key we want is inside "message", which is inside
+     * "choices".  There may also be a "reasoning_content" field before it.
+     * Find the "message" object first, then extract "content" from there. */
+    bool ok = false;
+    const char *msg = strstr(body, "\"message\"");
+    if (msg) {
+        ok = json_get_string(msg, "content", response_buf, buf_size);
+    }
+    if (!ok) {
+        /* Fallback: try top-level "content" (native /completion format) */
+        ok = json_get_string(body, "content", response_buf, buf_size);
+    }
+
     if (ok) {
-        printf("[llama] Response extracted (%d chars)\n", (int)strlen(response_buf));
+        printf("[llama] Response extracted (%d chars)\n",
+               (int)strlen(response_buf));
     } else {
-        printf("[llama] Failed to extract 'content' field from JSON\n");
+        printf("[llama] Failed to extract response from JSON\n");
+        printf("[llama] Body preview: %.300s\n", body);
     }
     fflush(stdout);
 
