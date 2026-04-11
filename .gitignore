@@ -16,5 +16,3 @@ Thumbs.db
 # Cursor
 .cursor/
 
-# LLM bot script is local-only – each user maintains their own version
-scripts/bot_llm.lua

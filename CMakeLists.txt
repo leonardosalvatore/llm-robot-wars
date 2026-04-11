@@ -7,23 +7,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Allow using pre-fetched sources from a sibling OllamaWars build.
-# Pass -DOLLAMAWARS_DEPS_DIR=<path> or rely on the default relative location.
-set(OLLAMAWARS_DEPS_DIR "${CMAKE_SOURCE_DIR}/../OllamaWars/build/_deps"
-    CACHE PATH "Path to OllamaWars _deps (for offline source reuse)")
-
-if(EXISTS "${OLLAMAWARS_DEPS_DIR}/raylib-src")
-    set(FETCHCONTENT_SOURCE_DIR_RAYLIB "${OLLAMAWARS_DEPS_DIR}/raylib-src"
-        CACHE PATH "" FORCE)
-endif()
-if(EXISTS "${OLLAMAWARS_DEPS_DIR}/lua-src")
-    set(FETCHCONTENT_SOURCE_DIR_LUA "${OLLAMAWARS_DEPS_DIR}/lua-src"
-        CACHE PATH "" FORCE)
-endif()
-if(EXISTS "${OLLAMAWARS_DEPS_DIR}/raygui-src")
-    set(FETCHCONTENT_SOURCE_DIR_RAYGUI "${OLLAMAWARS_DEPS_DIR}/raygui-src"
-        CACHE PATH "" FORCE)
-endif()
 
 # Raylib
 FetchContent_Declare(
