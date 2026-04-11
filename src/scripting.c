@@ -166,11 +166,13 @@ static int lua_api_scan(lua_State *L) {
         if (dist <= radius &&
             !walls_block_segment(sx, sz, b->x, b->z)) {
             lua_newtable(L);
-            lua_pushstring(L, "bot");            lua_setfield(L, -2, "type");
-            lua_pushnumber(L, (double)b->x);     lua_setfield(L, -2, "x");
-            lua_pushnumber(L, (double)b->z);     lua_setfield(L, -2, "z");
-            lua_pushnumber(L, (double)dist);     lua_setfield(L, -2, "distance");
-            lua_pushinteger(L, b->script_id);    lua_setfield(L, -2, "team");
+            lua_pushstring(L, "bot");                        lua_setfield(L, -2, "type");
+            lua_pushnumber(L, (double)b->x);                 lua_setfield(L, -2, "x");
+            lua_pushnumber(L, (double)b->z);                 lua_setfield(L, -2, "z");
+            lua_pushnumber(L, (double)dist);                 lua_setfield(L, -2, "distance");
+            lua_pushinteger(L, b->script_id);                lua_setfield(L, -2, "team");
+            lua_pushnumber(L, (double)b->hp);                lua_setfield(L, -2, "hp");
+            lua_pushnumber(L, (double)b->config.max_hp);     lua_setfield(L, -2, "max_hp");
             lua_rawseti(L, -2, entry++);
         }
     }

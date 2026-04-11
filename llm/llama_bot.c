@@ -304,6 +304,22 @@ void llm_bot_submit_match(const MatchStats *s) {
             s->script_error);
     }
 
+    /* Detect known bug: shadowing the scan() API with a local variable.
+     * e.g.  local scan = scan(r)   -- shadows the global scan function! */
+    char known_bugs[512] = "";
+    if (strstr(current, "local scan") != NULL) {
+        snprintf(known_bugs, sizeof(known_bugs),
+            "=== CRITICAL BUG IN CURRENT SCRIPT ===\n"
+            "The script uses `local scan = scan(...)` which SHADOWS the global\n"
+            "scan() API function. Every subsequent call to scan() then fails with\n"
+            "\"attempt to call a table value (local 'scan')\".\n"
+            "Fix: store scan results in a DIFFERENT variable name, e.g.:\n"
+            "  local targets = scan(radius)\n"
+            "  for _, t in ipairs(targets) do ... end\n"
+            "Never name a local variable the same as an API function.\n"
+            "\n");
+    }
+
     snprintf(ta->prompt, sizeof(ta->prompt),
         "You are iteratively improving a Lua script for an arena combat robot game.\n"
         "\n"
@@ -319,7 +335,14 @@ void llm_bot_submit_match(const MatchStats *s) {
         "  Weapons: \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
         "  Armour:  0 (fast, 100 HP) ... 3 (slow, 250 HP)\n"
         "\n"
-        "%s"
+        "=== NAMING RULES (CRITICAL) ===\n"
+        "NEVER name a local variable the same as an API function.\n"
+        "BAD:  local scan = scan(r)   -- shadows scan(), breaks all future calls\n"
+        "GOOD: local targets = scan(r)\n"
+        "Same rule applies to move, fire, and any other API name.\n"
+        "\n"
+        "%s"   /* known_bugs */
+        "%s"   /* error_section */
         "=== Current script ===\n"
         "%s\n"
         "\n"
@@ -330,6 +353,7 @@ void llm_bot_submit_match(const MatchStats *s) {
         "Winner    : %s\n"
         "\n"
         "Return ONLY the improved Lua script, no explanation, no markdown fences.\n",
+        known_bugs,
         error_section,
         current,
         s->match_number, s->total_matches,

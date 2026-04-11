@@ -21,7 +21,7 @@ typedef struct {
 
 typedef struct {
     bool          is_busy;
-    char          server[80];
+    char          server[128];
     int           prompt_chars;
     int           response_chars;
     int           bytes_rx;

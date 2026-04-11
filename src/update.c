@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -21,6 +22,11 @@ static float g_arena_half_z = 10.0f;
 
 static float g_llm_damage = 0.0f;
 static int   g_llm_kills  = 0;
+
+/* Deduplicate noisy per-frame script errors: only print when the message
+ * changes for a given bot slot. */
+#define MAX_BOTS_DEDUP 16
+static char s_last_script_err[MAX_BOTS_DEDUP][256];
 
 void update_reset_llm_stats(void) {
     g_llm_damage = 0.0f;
@@ -76,8 +82,21 @@ void update_scripts(Bot *bots, int count, float dt) {
         }
         lua_pushnumber(L, (double)dt);
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-            fprintf(stderr, "[script] bot %d: %s\n", i, lua_tostring(L, -1));
+            const char *err = lua_tostring(L, -1);
+            if (err == NULL) err = "(unknown error)";
+            if (i < MAX_BOTS_DEDUP) {
+                if (strncmp(s_last_script_err[i], err, 255) != 0) {
+                    fprintf(stderr, "[script] bot %d: %s\n", i, err);
+                    strncpy(s_last_script_err[i], err, 255);
+                    s_last_script_err[i][255] = '\0';
+                }
+            } else {
+                fprintf(stderr, "[script] bot %d: %s\n", i, err);
+            }
             lua_pop(L, 1);
+        } else if (i < MAX_BOTS_DEDUP && s_last_script_err[i][0] != '\0') {
+            /* Script recovered — reset so the next error is printed */
+            s_last_script_err[i][0] = '\0';
         }
     }
 }
