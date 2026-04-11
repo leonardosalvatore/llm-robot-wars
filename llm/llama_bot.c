@@ -36,6 +36,11 @@ static LlmLogColor    g_script_color        = LLOG_DIM;
 static char           g_gen_error[512]      = "";
 static bool           g_gen_error_pending   = false;
 
+/* Rolling match history for richer LLM context */
+#define MATCH_HISTORY_SIZE 3
+static MatchStats g_match_history[MATCH_HISTORY_SIZE];
+static int        g_match_history_count = 0;
+
 /* ----------------------------------------------------------------------- */
 static int read_file(const char *path, char *buf, int buf_size) {
     FILE *f = fopen(path, "r");
@@ -138,6 +143,10 @@ static void extract_lua(const char *response, char *out, int out_size) {
     const char *p = response;
     while (*p == '`') p++;
     while (*p == '\n' || *p == '\r') p++;
+    /* Strip bare language-hint line ("lua\n") that some models emit
+     * instead of a proper ```lua fence */
+    if (strncmp(p, "lua\n", 4) == 0)        p += 4;
+    else if (strncmp(p, "lua\r\n", 5) == 0) p += 5;
     int len = (int)strlen(p);
     if (len >= out_size) len = out_size - 1;
     memcpy(out, p, (size_t)len);
@@ -294,6 +303,16 @@ void llm_bot_submit_match(const MatchStats *s) {
     if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
         snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
 
+    /* Push new match into rolling history */
+    if (g_match_history_count < MATCH_HISTORY_SIZE) {
+        g_match_history[g_match_history_count++] = *s;
+    } else {
+        memmove(g_match_history, g_match_history + 1,
+                (MATCH_HISTORY_SIZE - 1) * sizeof(MatchStats));
+        g_match_history[MATCH_HISTORY_SIZE - 1] = *s;
+    }
+
+    /* Error section: load-time errors take priority; runtime errors otherwise */
     char error_section[1024] = "";
     if (s->script_error[0] != '\0') {
         snprintf(error_section, sizeof(error_section),
@@ -302,22 +321,54 @@ void llm_bot_submit_match(const MatchStats *s) {
             "The bots had no AI this match because the script would not load.\n"
             "\n",
             s->script_error);
+    } else if (s->runtime_error[0] != '\0') {
+        snprintf(error_section, sizeof(error_section),
+            "=== RUNTIME ERROR — fix this! ===\n"
+            "Lua error: %s\n"
+            "The script loaded but crashed every frame during play, so bots did nothing.\n"
+            "\n",
+            s->runtime_error);
     }
 
-    /* Detect known bug: shadowing the scan() API with a local variable.
-     * e.g.  local scan = scan(r)   -- shadows the global scan function! */
-    char known_bugs[512] = "";
+    /* Known bugs detected by static analysis of the current script */
+    char known_bugs[2048] = "";
+    int  kb_len = 0;
+
     if (strstr(current, "local scan") != NULL) {
-        snprintf(known_bugs, sizeof(known_bugs),
-            "=== CRITICAL BUG IN CURRENT SCRIPT ===\n"
+        kb_len += snprintf(known_bugs + kb_len, (int)sizeof(known_bugs) - kb_len,
+            "=== CRITICAL BUG: variable shadows scan() API ===\n"
             "The script uses `local scan = scan(...)` which SHADOWS the global\n"
-            "scan() API function. Every subsequent call to scan() then fails with\n"
-            "\"attempt to call a table value (local 'scan')\".\n"
-            "Fix: store scan results in a DIFFERENT variable name, e.g.:\n"
-            "  local targets = scan(radius)\n"
-            "  for _, t in ipairs(targets) do ... end\n"
-            "Never name a local variable the same as an API function.\n"
+            "scan() API function. Every subsequent call to scan() then fails.\n"
+            "Fix: use a different name, e.g. `local targets = scan(radius)`.\n"
+            "NEVER name a local variable the same as an API function.\n"
             "\n");
+    }
+
+    if (strstr(current, "math.atan2") != NULL) {
+        kb_len += snprintf(known_bugs + kb_len, (int)sizeof(known_bugs) - kb_len,
+            "=== CRITICAL BUG: math.atan2 does not exist in Lua 5.3+ ===\n"
+            "Replace every `math.atan2(y, x)` with `math.atan(y, x)`.\n"
+            "In Lua 5.3+, math.atan accepts two arguments and replaces math.atan2.\n"
+            "\n");
+    }
+
+    /* Build compact match-history section (last 1-3 matches) */
+    char history_section[512] = "";
+    int  hs_len = 0;
+    hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
+        "=== Recent match results (%d match(es)) ===\n",
+        g_match_history_count);
+    for (int hi = 0; hi < g_match_history_count; hi++) {
+        const MatchStats *h = &g_match_history[hi];
+        hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
+            "Match %d/%d: %.1fs | Survivors %d/%d (%.0f%%) | "
+            "Dmg %.0f | Kills %d | Winner: %s\n",
+            h->match_number, h->total_matches,
+            (double)h->duration,
+            h->llm_survivors, h->llm_start,
+            (double)(h->llm_avg_hp_frac * 100.0f),
+            (double)h->damage_dealt, h->kills,
+            h->winner_name);
     }
 
     snprintf(ta->prompt, sizeof(ta->prompt),
@@ -334,6 +385,7 @@ void llm_bot_submit_match(const MatchStats *s) {
         "init() must return: {left_weapon, right_weapon, armour}\n"
         "  Weapons: \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
         "  Armour:  0 (fast, 100 HP) ... 3 (slow, 250 HP)\n"
+        "Lua math: use math.atan(y, x) -- math.atan2 does NOT exist in Lua 5.3+\n"
         "\n"
         "=== NAMING RULES (CRITICAL) ===\n"
         "NEVER name a local variable the same as an API function.\n"
@@ -346,22 +398,13 @@ void llm_bot_submit_match(const MatchStats *s) {
         "=== Current script ===\n"
         "%s\n"
         "\n"
-        "=== Match %d / %d result ===\n"
-        "Duration  : %.1f s\n"
-        "Survivors : %d / %d started  (avg HP %.0f%%)\n"
-        "Damage    : %.0f dealt  |  %d kills\n"
-        "Winner    : %s\n"
+        "%s"   /* history_section */
         "\n"
         "Return ONLY the improved Lua script, no explanation, no markdown fences.\n",
         known_bugs,
         error_section,
         current,
-        s->match_number, s->total_matches,
-        (double)s->duration,
-        s->llm_survivors, s->llm_start,
-        (double)(s->llm_avg_hp_frac * 100.0f),
-        (double)s->damage_dealt, s->kills,
-        s->winner_name
+        history_section
     );
 
     free(current);

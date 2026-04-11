@@ -23,6 +23,9 @@ static float g_arena_half_z = 10.0f;
 static float g_llm_damage = 0.0f;
 static int   g_llm_kills  = 0;
 
+/* Last runtime error seen from an LLM bot, for LLM feedback */
+static char  g_last_runtime_error[512] = {0};
+
 /* Deduplicate noisy per-frame script errors: only print when the message
  * changes for a given bot slot. */
 #define MAX_BOTS_DEDUP 16
@@ -36,6 +39,15 @@ void update_reset_llm_stats(void) {
 void update_get_llm_stats(float *dmg_out, int *kills_out) {
     *dmg_out   = g_llm_damage;
     *kills_out = g_llm_kills;
+}
+
+void update_clear_runtime_error(void) {
+    g_last_runtime_error[0] = '\0';
+}
+
+void update_get_runtime_error(char *buf, int size) {
+    strncpy(buf, g_last_runtime_error, (size_t)(size - 1));
+    buf[size - 1] = '\0';
 }
 
 void update_set_arena(float half_x, float half_z) {
@@ -89,6 +101,11 @@ void update_scripts(Bot *bots, int count, float dt) {
                     fprintf(stderr, "[script] bot %d: %s\n", i, err);
                     strncpy(s_last_script_err[i], err, 255);
                     s_last_script_err[i][255] = '\0';
+                    /* Capture first unique runtime error from LLM bots for prompt feedback */
+                    if (b->script_id == LLM_SCRIPT_IDX && g_last_runtime_error[0] == '\0') {
+                        strncpy(g_last_runtime_error, err, sizeof(g_last_runtime_error) - 1);
+                        g_last_runtime_error[sizeof(g_last_runtime_error) - 1] = '\0';
+                    }
                 }
             } else {
                 fprintf(stderr, "[script] bot %d: %s\n", i, err);

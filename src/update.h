@@ -11,3 +11,6 @@ void update_projectiles(Proj *projs, int *pcount, Bot *bots, int bcount, float d
 
 void update_reset_llm_stats(void);
 void update_get_llm_stats(float *dmg_out, int *kills_out);
+
+void update_clear_runtime_error(void);
+void update_get_runtime_error(char *buf, int size);

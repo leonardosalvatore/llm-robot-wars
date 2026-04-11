@@ -37,7 +37,6 @@ int  g_proj_count = 0;
 
 /* ----------------------------------------------------------------------- */
 static const char *script_paths[TOTAL_SCRIPTS] = {
-    "scripts/bot_random.lua",
     "scripts/bot_light.lua",
     "scripts/bot_skirmisher.lua",
     "scripts/bot_chaser.lua",
@@ -48,14 +47,12 @@ static const char *script_paths[TOTAL_SCRIPTS] = {
 };
 
 static const char *script_labels[TOTAL_SCRIPTS] = {
-    "bot_random",
     "bot_light", "bot_skirmisher", "bot_chaser",
     "bot_duelist", "bot_lancer", "bot_fortress",
     "bot_llm",
 };
 
 static const Color script_colors[TOTAL_SCRIPTS] = {
-    {255,230, 50,255},
     {130,255,130,255},
     {100,230,100,255},
     { 80,210, 80,255},
@@ -77,7 +74,7 @@ typedef struct {
     int   llm_port;
 } GameConfig;
 
-static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 2, 2 };
+static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 2 };
 static const float DEFAULT_MAP_SIZE             = 30.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
 static const int   DEFAULT_MATCH_DURATION       = 50;
@@ -610,6 +607,7 @@ int main(void) {
         unsigned wall_seed = (unsigned)time(NULL) + (unsigned)(match_idx * 31337);
         match_setup(&ms, &gcfg, arena_half, wall_seed);
         update_reset_llm_stats();
+        update_clear_runtime_error();
 
         float match_time    = 0.0f;
         bool  match_over    = false;
@@ -693,14 +691,6 @@ int main(void) {
                         draw_bot(b->x, b->z, col, &b->config,
                                  b->inertia.body_angle, b->inertia.turret_angle);
 
-                        if (b->inertia.scan_radius > 0.1f) {
-                            Color ring_col = {col.r, col.g, col.b, 85};
-                            DrawCircle3D(
-                                (Vector3){b->x, 0.05f, b->z},
-                                b->inertia.scan_radius,
-                                (Vector3){1.0f, 0.0f, 0.0f}, 90.0f,
-                                ring_col);
-                        }
 
                         /* Energy bar */
                         float bar_base_y = BAR_Y * b->config.body_scale;
@@ -797,11 +787,18 @@ int main(void) {
 
             /* Check match-end conditions */
             if (gcfg.use_llm) {
-                int teams_alive = 0;
+                int llm_alive   = alive[LLM_SCRIPT_IDX];
+                int non_llm_alive = 0;
                 for (int s = 0; s < TOTAL_SCRIPTS; s++)
-                    if (alive[s] > 0) teams_alive++;
-                if (match_time > 5.0f && teams_alive <= 1 && teams_with_bots > 1)
-                    match_over = true;
+                    if (s != LLM_SCRIPT_IDX && alive[s] > 0) non_llm_alive++;
+
+                /* End as soon as the contest is decided:
+                 *   - all LLM bots dead  → non-LLM side wins
+                 *   - no non-LLM bots left → LLM bot wins */
+                if (match_time > 3.0f && teams_with_bots > 1) {
+                    if (llm_alive == 0 || non_llm_alive == 0)
+                        match_over = true;
+                }
                 if (match_time >= (float)gcfg.match_duration)
                     match_over = true;
             }
@@ -836,6 +833,7 @@ int main(void) {
                                      ? hp_frac_sum / (float)hp_count : 0.0f;
 
             update_get_llm_stats(&mstats.damage_dealt, &mstats.kills);
+            update_get_runtime_error(mstats.runtime_error, sizeof(mstats.runtime_error));
 
             if (ms.llm_load_error[0] != '\0')
                 strncpy(mstats.script_error, ms.llm_load_error,
@@ -844,14 +842,22 @@ int main(void) {
                 strncpy(mstats.script_error, llm_pending_error,
                         sizeof(mstats.script_error) - 1);
 
-            int  alive_teams = 0, winner_idx = -1;
-            for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-                if (alive[s] > 0) { alive_teams++; winner_idx = s; }
-            }
-            if (alive_teams != 1) winner_idx = -1;
-            strncpy(mstats.winner_name,
-                    winner_idx >= 0 ? script_labels[winner_idx] : "timeout",
-                    sizeof(mstats.winner_name) - 1);
+            /* Two-sided match: LLM vs non-LLM coalition.
+             * Winner is "bot_llm" if all non-LLM bots are gone, "non_llm" if
+             * all LLM bots are gone, or "timeout" if neither side is wiped. */
+            int end_llm_alive = alive[LLM_SCRIPT_IDX];
+            int end_non_llm   = 0;
+            for (int s = 0; s < TOTAL_SCRIPTS; s++)
+                if (s != LLM_SCRIPT_IDX && alive[s] > 0) end_non_llm++;
+
+            const char *winner_name;
+            if (end_non_llm == 0 && end_llm_alive > 0)
+                winner_name = script_labels[LLM_SCRIPT_IDX];
+            else if (end_llm_alive == 0 && end_non_llm > 0)
+                winner_name = "non_llm";
+            else
+                winner_name = "timeout";
+            strncpy(mstats.winner_name, winner_name, sizeof(mstats.winner_name) - 1);
 
             if (match_idx < 64)
                 strncpy(match_winners[match_idx], mstats.winner_name,

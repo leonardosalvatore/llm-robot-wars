@@ -6,8 +6,9 @@
 
 #define MAX_BOTS        128
 #define MAX_PROJECTILES 512
-#define TOTAL_SCRIPTS     8
-#define LLM_SCRIPT_IDX    7
+#define TOTAL_SCRIPTS     7
+#define LLM_SCRIPT_IDX    6
+#define MAX_SCAN_HITS    64
 
 typedef enum {
     WEAPON_MACHINE_GUN = 0,
@@ -31,7 +32,9 @@ typedef struct {
     float desired_body_angle;
     float desired_turret_angle;
     int   move_requested;
-    float scan_radius;
+    float scan_hit_x[MAX_SCAN_HITS];
+    float scan_hit_z[MAX_SCAN_HITS];
+    int   scan_hit_count;
 } BotInertia;
 
 typedef struct {

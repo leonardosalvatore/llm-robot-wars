@@ -42,6 +42,7 @@ typedef struct {
     int   kills;
     char  winner_name[32];
     char  script_error[512];
+    char  runtime_error[512];
 } MatchStats;
 
 void llm_bot_init(const char *host, int port, const char *script_path);

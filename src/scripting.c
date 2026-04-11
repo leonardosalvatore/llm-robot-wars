@@ -135,7 +135,8 @@ static int lua_api_fire(lua_State *L) {
 
 /* ----------------------------------------------------------------------- */
 static int lua_api_scan(lua_State *L) {
-    float radius = (float)luaL_checknumber(L, 1);
+    /* radius argument kept for backward-compat but ignored — scan is infinite */
+    (void)luaL_checknumber(L, 1);
 
     lua_getglobal(L, "__bot_idx");
     int self_idx = (int)lua_tointeger(L, -1);
@@ -150,34 +151,50 @@ static int lua_api_scan(lua_State *L) {
 
     float sx = self->x;
     float sz = self->z;
-    self->inertia.scan_radius = radius;
+
+    /* reset hit list for this frame */
+    self->inertia.scan_hit_count = 0;
+
+    bool self_is_llm = (self->script_id == LLM_SCRIPT_IDX);
 
     lua_newtable(L);
     int entry = 1;
 
-    /* Bots */
+    /* Bots — infinite range, LOS-only.
+     * Non-LLM bots cannot see each other; only the LLM bot is visible to them. */
     for (int i = 0; i < g_bot_count; i++) {
         if (i == self_idx) continue;
         Bot *b = &g_bots[i];
         if (!b->active) continue;
+
+        bool target_is_llm = (b->script_id == LLM_SCRIPT_IDX);
+        if (!self_is_llm && !target_is_llm) continue;
+
+        if (walls_block_segment(sx, sz, b->x, b->z)) continue;
+
         float ddx  = b->x - sx;
         float ddz  = b->z - sz;
         float dist = sqrtf(ddx * ddx + ddz * ddz);
-        if (dist <= radius &&
-            !walls_block_segment(sx, sz, b->x, b->z)) {
-            lua_newtable(L);
-            lua_pushstring(L, "bot");                        lua_setfield(L, -2, "type");
-            lua_pushnumber(L, (double)b->x);                 lua_setfield(L, -2, "x");
-            lua_pushnumber(L, (double)b->z);                 lua_setfield(L, -2, "z");
-            lua_pushnumber(L, (double)dist);                 lua_setfield(L, -2, "distance");
-            lua_pushinteger(L, b->script_id);                lua_setfield(L, -2, "team");
-            lua_pushnumber(L, (double)b->hp);                lua_setfield(L, -2, "hp");
-            lua_pushnumber(L, (double)b->config.max_hp);     lua_setfield(L, -2, "max_hp");
-            lua_rawseti(L, -2, entry++);
+
+        int h = self->inertia.scan_hit_count;
+        if (h < MAX_SCAN_HITS) {
+            self->inertia.scan_hit_x[h] = b->x;
+            self->inertia.scan_hit_z[h] = b->z;
+            self->inertia.scan_hit_count++;
         }
+
+        lua_newtable(L);
+        lua_pushstring(L, "bot");                        lua_setfield(L, -2, "type");
+        lua_pushnumber(L, (double)b->x);                 lua_setfield(L, -2, "x");
+        lua_pushnumber(L, (double)b->z);                 lua_setfield(L, -2, "z");
+        lua_pushnumber(L, (double)dist);                 lua_setfield(L, -2, "distance");
+        lua_pushinteger(L, b->script_id);                lua_setfield(L, -2, "team");
+        lua_pushnumber(L, (double)b->hp);                lua_setfield(L, -2, "hp");
+        lua_pushnumber(L, (double)b->config.max_hp);     lua_setfield(L, -2, "max_hp");
+        lua_rawseti(L, -2, entry++);
     }
 
-    /* Walls */
+    /* Walls — infinite range, no LOS check needed */
     int         wn = walls_count();
     const Wall *wv = walls_get();
     for (int i = 0; i < wn; i++) {
@@ -189,14 +206,20 @@ static int lua_api_scan(lua_State *L) {
         float ddx  = clamp_x - sx;
         float ddz  = clamp_z - sz;
         float dist = sqrtf(ddx * ddx + ddz * ddz);
-        if (dist <= radius) {
-            lua_newtable(L);
-            lua_pushstring(L, "wall");          lua_setfield(L, -2, "type");
-            lua_pushnumber(L, (double)clamp_x); lua_setfield(L, -2, "x");
-            lua_pushnumber(L, (double)clamp_z); lua_setfield(L, -2, "z");
-            lua_pushnumber(L, (double)dist);    lua_setfield(L, -2, "distance");
-            lua_rawseti(L, -2, entry++);
+
+        int h = self->inertia.scan_hit_count;
+        if (h < MAX_SCAN_HITS) {
+            self->inertia.scan_hit_x[h] = clamp_x;
+            self->inertia.scan_hit_z[h] = clamp_z;
+            self->inertia.scan_hit_count++;
         }
+
+        lua_newtable(L);
+        lua_pushstring(L, "wall");          lua_setfield(L, -2, "type");
+        lua_pushnumber(L, (double)clamp_x); lua_setfield(L, -2, "x");
+        lua_pushnumber(L, (double)clamp_z); lua_setfield(L, -2, "z");
+        lua_pushnumber(L, (double)dist);    lua_setfield(L, -2, "distance");
+        lua_rawseti(L, -2, entry++);
     }
 
     return 1;
