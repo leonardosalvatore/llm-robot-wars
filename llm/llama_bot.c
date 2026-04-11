@@ -105,6 +105,7 @@ static void extract_lua(const char *response, char *out, int out_size) {
         start = strstr(response, "```");
         if (start) {
             start += 3;
+            while (*start && *start != '\n') start++;
             if (*start == '\n') start++;
         }
     }
@@ -121,11 +122,25 @@ static void extract_lua(const char *response, char *out, int out_size) {
             out[len] = '\0';
             return;
         }
+        /* Opening fence found but no closing fence (truncated response).
+         * Use everything after the opening fence anyway. */
+        int len = (int)strlen(start);
+        if (len >= out_size) len = out_size - 1;
+        while (len > 0 && (start[len-1] == '\n' || start[len-1] == '\r'
+                            || start[len-1] == ' '))
+            len--;
+        memcpy(out, start, (size_t)len);
+        out[len] = '\0';
+        return;
     }
 
-    int len = (int)strlen(response);
+    /* No fences at all -- strip any leading backticks just in case */
+    const char *p = response;
+    while (*p == '`') p++;
+    while (*p == '\n' || *p == '\r') p++;
+    int len = (int)strlen(p);
     if (len >= out_size) len = out_size - 1;
-    memcpy(out, response, (size_t)len);
+    memcpy(out, p, (size_t)len);
     out[len] = '\0';
 }
 

@@ -13,7 +13,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define HIT_RADIUS2  0.36f   /* squared hit radius = 0.6^2 */
+#define HIT_RADIUS2      0.36f   /* squared hit radius = 0.6^2 */
+#define BOT_WALL_MARGIN  0.35f   /* keep bots away from border wall inner face */
 
 static float g_arena_half_x = 10.0f;
 static float g_arena_half_z = 10.0f;
@@ -119,10 +120,12 @@ void update_movement(Bot *bots, int count, float dt) {
         b->x += b->vx * dt;
         b->z += b->vz * dt;
 
-        if (b->x >  g_arena_half_x) { b->x =  g_arena_half_x; b->vx = -b->vx; }
-        if (b->x < -g_arena_half_x) { b->x = -g_arena_half_x; b->vx = -b->vx; }
-        if (b->z >  g_arena_half_z) { b->z =  g_arena_half_z; b->vz = -b->vz; }
-        if (b->z < -g_arena_half_z) { b->z = -g_arena_half_z; b->vz = -b->vz; }
+        float bx = g_arena_half_x - BOT_WALL_MARGIN;
+        float bz = g_arena_half_z - BOT_WALL_MARGIN;
+        if (b->x >  bx) { b->x =  bx; b->vx = -b->vx; }
+        if (b->x < -bx) { b->x = -bx; b->vx = -b->vx; }
+        if (b->z >  bz) { b->z =  bz; b->vz = -b->vz; }
+        if (b->z < -bz) { b->z = -bz; b->vz = -b->vz; }
 
         walls_push_out_bot(&b->x, &b->z, &b->vx, &b->vz);
     }
@@ -141,9 +144,9 @@ void update_projectiles(Proj *projs, int *pcount, Bot *bots, int bcount, float d
 
         bool dead = p->lifetime <= 0.0f
                  || fabsf(p->x) > g_arena_half_x + 2.0f
-                 || fabsf(p->z) > g_arena_half_z + 2.0f
-                 || walls_block_segment(old_x, old_z, p->x, p->z);
+                 || fabsf(p->z) > g_arena_half_z + 2.0f;
 
+        /* Check bot hits BEFORE wall blocking so projectiles reach bots near walls */
         if (!dead) {
             for (int j = 0; j < bcount; j++) {
                 Bot *b = &bots[j];
@@ -172,6 +175,9 @@ void update_projectiles(Proj *projs, int *pcount, Bot *bots, int bcount, float d
                 }
             }
         }
+
+        if (!dead)
+            dead = walls_block_segment(old_x, old_z, p->x, p->z);
 
         if (dead)
             p->active = false;

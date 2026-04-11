@@ -198,10 +198,10 @@ void walls_add_border(float ahx, float ahz) {
     /* South face (z = +ahz) */
     g_walls[g_wall_count++] = (Wall){ .x =  0.0f,    .z = +(ahz + t),
                                       .hw = ahx + t,  .hd = t, .height = h };
-    /* West face (x = -ahx) */
+    /* West face (x = -ahx) — extend Z to cover corners */
     g_walls[g_wall_count++] = (Wall){ .x = -(ahx + t), .z = 0.0f,
-                                      .hw = t,  .hd = ahz,     .height = h };
-    /* East face (x = +ahx) */
+                                      .hw = t,  .hd = ahz + t, .height = h };
+    /* East face (x = +ahx) — extend Z to cover corners */
     g_walls[g_wall_count++] = (Wall){ .x = +(ahx + t), .z = 0.0f,
-                                      .hw = t,  .hd = ahz,     .height = h };
+                                      .hw = t,  .hd = ahz + t, .height = h };
 }

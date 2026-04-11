@@ -571,7 +571,7 @@ static void show_match_result(const MatchStats *ms, bool llm_busy, bool is_last)
 int main(void) {
     srand((unsigned)time(NULL));
 
-    InitWindow(1280, 720, "LlamaWars");
+    InitWindow(1920, 1080, "LlamaWars");
     SetTargetFPS(60);
     fx_init();
 

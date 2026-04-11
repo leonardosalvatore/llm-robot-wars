@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#define HTTP_BUF_SIZE   (512 * 1024)
+#define HTTP_BUF_SIZE   (2 * 1024 * 1024)
 #define CONNECT_TIMEOUT  10
 #define GENERATE_TIMEOUT 300
 
@@ -176,7 +176,7 @@ int llama_generate(const char *host, int port,
     if (!json_body) { free(esc_prompt); return -1; }
     int body_len = snprintf(json_body, (size_t)body_cap,
         "{\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],"
-        "\"max_tokens\":4096,\"stream\":false}",
+        "\"max_tokens\":8192,\"stream\":false}",
         esc_prompt);
     free(esc_prompt);
 
