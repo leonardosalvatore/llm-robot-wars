@@ -253,8 +253,6 @@ static void show_config_screen(GameConfig *cfg) {
 
         /* Bot count spinners */
         for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-            if (s == LLM_SCRIPT_IDX && !cfg->use_llm) GuiDisable();
-
             GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
                                  (float)LBL_W, (float)ROW_H},
                      script_labels[s]);
@@ -262,11 +260,6 @@ static void show_config_screen(GameConfig *cfg) {
                                        (float)CTL_W, (float)(ROW_H - 4)},
                            NULL, &cfg->bots_per_type[s], 0, 30, edit[s + 5]))
                 edit[s + 5] = !edit[s + 5];
-
-            if (s == LLM_SCRIPT_IDX && !cfg->use_llm) {
-                cfg->bots_per_type[s] = 0;
-                GuiEnable();
-            }
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
                 Rectangle r = {(float)CTL_X, (float)ROW_Y,
