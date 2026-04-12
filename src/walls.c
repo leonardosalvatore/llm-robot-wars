@@ -189,7 +189,7 @@ void walls_add_border(float ahx, float ahz) {
     if (g_wall_count + 4 > MAX_WALLS) return;  /* shouldn't happen */
 
     float t = 0.25f;   /* half-thickness */
-    float h = 1.25f;   /* visible height  */
+    float h = 0.525f;  /* same height as generated walls */
 
     /* North face (z = -ahz) */
     g_walls[g_wall_count++] = (Wall){ .x =  0.0f,    .z = -(ahz + t),

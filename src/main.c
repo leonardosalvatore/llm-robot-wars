@@ -76,7 +76,7 @@ typedef struct {
     int   llm_port;
 } GameConfig;
 
-static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 2 };
+static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 10 };
 static const float DEFAULT_MAP_WIDTH            = 50.0f;
 static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
@@ -617,13 +617,26 @@ int main(void) {
     float arena_half_x = gcfg.map_width  * 0.5f;
     float arena_half_z = gcfg.map_height * 0.5f;
 
-    Camera3D camera = {
+    /* Camera mode 0: top-down orthographic (default) */
+    Camera3D cam_ortho = {
         .position   = {40.0f, 40.0f, 40.0f},
         .target     = { 0.0f,  0.0f,  0.0f},
         .up         = { 0.0f,  1.0f,  0.0f},
         .fovy       = 45.0f,
         .projection = CAMERA_ORTHOGRAPHIC
     };
+
+    /* Camera mode 1: 3rd-person perspective behind the LLM spawn side */
+    Camera3D cam_third = {
+        .position   = {arena_half_x * 1.2f, arena_half_z * 0.9f, 0.0f},
+        .target     = {0.0f, 0.0f, 0.0f},
+        .up         = {0.0f, 1.0f, 0.0f},
+        .fovy       = 60.0f,
+        .projection = CAMERA_PERSPECTIVE
+    };
+
+    int cam_mode = 0;
+    Camera3D *camera = &cam_ortho;
 
     Vector3 pan_right   = Vector3Normalize((Vector3){1.0f, 0.0f, -1.0f});
     Vector3 pan_forward = Vector3Normalize((Vector3){1.0f, 0.0f,  1.0f});
@@ -662,21 +675,27 @@ int main(void) {
             float dt = GetFrameTime();
             match_time += dt;
 
+            /* Camera mode toggle */
+            if (IsKeyPressed(KEY_C)) {
+                cam_mode = 1 - cam_mode;
+                camera = cam_mode ? &cam_third : &cam_ortho;
+            }
+
             /* Camera controls */
             Vector3 delta = {0};
             if (IsKeyDown(KEY_D)) delta = Vector3Add(delta, Vector3Scale(pan_right,    CAM_SPEED * dt));
             if (IsKeyDown(KEY_A)) delta = Vector3Add(delta, Vector3Scale(pan_right,   -CAM_SPEED * dt));
             if (IsKeyDown(KEY_W)) delta = Vector3Add(delta, Vector3Scale(pan_forward, -CAM_SPEED * dt));
             if (IsKeyDown(KEY_S)) delta = Vector3Add(delta, Vector3Scale(pan_forward,  CAM_SPEED * dt));
-            camera.position = Vector3Add(camera.position, delta);
-            camera.target   = Vector3Add(camera.target,   delta);
+            camera->position = Vector3Add(camera->position, delta);
+            camera->target   = Vector3Add(camera->target,   delta);
 
             float wheel = GetMouseWheelMove();
-            camera.fovy -= wheel * 3.0f;
-            if (IsKeyDown(KEY_E)) camera.fovy -= ZOOM_SPEED * dt;
-            if (IsKeyDown(KEY_Q)) camera.fovy += ZOOM_SPEED * dt;
-            if (camera.fovy < ZOOM_MIN) camera.fovy = ZOOM_MIN;
-            if (camera.fovy > ZOOM_MAX) camera.fovy = ZOOM_MAX;
+            camera->fovy -= wheel * 3.0f;
+            if (IsKeyDown(KEY_E)) camera->fovy -= ZOOM_SPEED * dt;
+            if (IsKeyDown(KEY_Q)) camera->fovy += ZOOM_SPEED * dt;
+            if (camera->fovy < ZOOM_MIN) camera->fovy = ZOOM_MIN;
+            if (camera->fovy > ZOOM_MAX) camera->fovy = ZOOM_MAX;
 
             if (IsKeyPressed(KEY_F))      ToggleFullscreen();
             if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
@@ -692,7 +711,7 @@ int main(void) {
             /* ---- Render ------------------------------------------------- */
             BeginDrawing();
                 ClearBackground(BLACK);
-                BeginMode3D(camera);
+                BeginMode3D(*camera);
                     DrawPlane((Vector3){0,0,0},
                              (Vector2){gcfg.map_width, gcfg.map_height}, DARKGRAY);
 
@@ -744,6 +763,17 @@ int main(void) {
                         draw_bot(b->x, b->z, col, &b->config,
                                  b->inertia.body_angle, b->inertia.turret_angle);
 
+                        /* Scan lines */
+                        {
+                            Color scan_col = {b->r / 6, b->g / 6, b->b / 6, 40};
+                            float sy = 0.08f;
+                            for (int h = 0; h < b->inertia.scan_hit_count; h++)
+                                DrawLine3D(
+                                    (Vector3){b->x, sy, b->z},
+                                    (Vector3){b->inertia.scan_hit_x[h], sy,
+                                              b->inertia.scan_hit_z[h]},
+                                    scan_col);
+                        }
 
                         /* Energy bar */
                         float bar_base_y = BAR_Y * b->config.body_scale;
@@ -813,11 +843,11 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD pan  Q/E/scroll zoom  F fullscreen  R restart  ESC quit"
+                    ? TextFormat("WASD pan  Q/E/scroll zoom  C camera  F fullscreen  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD pan  Q/E/scroll zoom  F fullscreen  R restart  ESC quit";
+                    : "WASD pan  Q/E/scroll zoom  C camera  F fullscreen  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
