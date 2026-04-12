@@ -90,22 +90,9 @@ static float randf(float lo, float hi) {
 
 /* ----------------------------------------------------------------------- */
 static void show_config_screen(GameConfig *cfg) {
-    cfg->map_width        = DEFAULT_MAP_WIDTH;
-    cfg->map_height       = DEFAULT_MAP_HEIGHT;
-    cfg->num_walls        = DEFAULT_NUM_WALLS;
-    cfg->use_llm          = false;
-    cfg->opposite_corners = true;
-    cfg->auto_respawn     = false;
-    cfg->num_matches      = DEFAULT_NUM_MATCHES;
-    cfg->match_duration   = DEFAULT_MATCH_DURATION;
-    strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
-    cfg->llm_port = LLAMA_DEFAULT_PORT;
-    for (int s = 0; s < TOTAL_SCRIPTS; s++)
-        cfg->bots_per_type[s] = DEFAULT_BOTS[s];
-
-    /* Probe llama-server health */
+    /* Probe llama-server health each time the config screen is shown */
     bool server_available = llama_server_healthy(cfg->llm_host, cfg->llm_port);
-    if (server_available)
+    if (server_available && !cfg->use_llm)
         cfg->use_llm = true;
 
     const int SW      = GetRenderWidth();
@@ -678,12 +665,34 @@ int main(void) {
     fx_init();
 
     GameConfig gcfg;
+    gcfg.map_width        = DEFAULT_MAP_WIDTH;
+    gcfg.map_height       = DEFAULT_MAP_HEIGHT;
+    gcfg.num_walls        = DEFAULT_NUM_WALLS;
+    gcfg.use_llm          = false;
+    gcfg.opposite_corners = true;
+    gcfg.auto_respawn     = false;
+    gcfg.num_matches      = DEFAULT_NUM_MATCHES;
+    gcfg.match_duration   = DEFAULT_MATCH_DURATION;
+    strncpy(gcfg.llm_host, LLAMA_DEFAULT_HOST, sizeof(gcfg.llm_host) - 1);
+    gcfg.llm_port = LLAMA_DEFAULT_PORT;
+    for (int s = 0; s < TOTAL_SCRIPTS; s++)
+        gcfg.bots_per_type[s] = DEFAULT_BOTS[s];
+
+    Vector3 pan_right   = Vector3Normalize((Vector3){1.0f, 0.0f, -1.0f});
+    Vector3 pan_forward = Vector3Normalize((Vector3){1.0f, 0.0f,  1.0f});
+    bool show_scan_lines = false;
+
+    /* ================================================================== */
+    /* Session loop — config screen → game → results → back to config     */
+    /* ================================================================== */
+    while (!WindowShouldClose()) {
+
     show_config_screen(&gcfg);
+    if (WindowShouldClose()) break;
 
     float arena_half_x = gcfg.map_width  * 0.5f;
     float arena_half_z = gcfg.map_height * 0.5f;
 
-    /* Camera mode 0: top-down orthographic (default) */
     Camera3D cam_ortho = {
         .position   = {40.0f, 40.0f, 40.0f},
         .target     = { 0.0f,  0.0f,  0.0f},
@@ -691,8 +700,6 @@ int main(void) {
         .fovy       = 45.0f,
         .projection = CAMERA_ORTHOGRAPHIC
     };
-
-    /* Camera mode 1: 3rd-person perspective behind the LLM spawn side */
     Camera3D cam_third = {
         .position   = {arena_half_x * 1.2f, arena_half_z * 0.9f, 0.0f},
         .target     = {0.0f, 0.0f, 0.0f},
@@ -700,12 +707,8 @@ int main(void) {
         .fovy       = 60.0f,
         .projection = CAMERA_PERSPECTIVE
     };
-
     int cam_mode = 0;
     Camera3D *camera = &cam_ortho;
-
-    Vector3 pan_right   = Vector3Normalize((Vector3){1.0f, 0.0f, -1.0f});
-    Vector3 pan_forward = Vector3Normalize((Vector3){1.0f, 0.0f,  1.0f});
 
     if (gcfg.use_llm) {
         llm_bot_init(gcfg.llm_host, gcfg.llm_port,
@@ -718,7 +721,6 @@ int main(void) {
     memset(match_winners, 0, sizeof(match_winners));
     char llm_pending_error[512] = {0};
 
-    /* ================================================================== */
     while (!WindowShouldClose() && !outer_done) {
 
         MatchState ms;
@@ -766,6 +768,7 @@ int main(void) {
             if (camera->fovy > ZOOM_MAX) camera->fovy = ZOOM_MAX;
 
             if (IsKeyPressed(KEY_F))      ToggleFullscreen();
+            if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
             if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
             if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
 
@@ -831,8 +834,8 @@ int main(void) {
                         draw_bot(b->x, b->z, col, &b->config,
                                  b->inertia.body_angle, b->inertia.turret_angle);
 
-                        /* Scan lines */
-                        {
+                        /* Scan lines (toggle with T) */
+                        if (show_scan_lines) {
                             Color scan_col = {b->r / 6, b->g / 6, b->b / 6, 40};
                             float sy = 0.08f;
                             for (int h = 0; h < b->inertia.scan_hit_count; h++)
@@ -911,11 +914,11 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD pan  Q/E/scroll zoom  C camera  F fullscreen  R restart  ESC quit"
+                    ? TextFormat("WASD pan  Q/E zoom  C camera  T scan  F full  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD pan  Q/E/scroll zoom  C camera  F fullscreen  R restart  ESC quit";
+                    : "WASD pan  Q/E zoom  C camera  T scan  F full  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
@@ -1139,8 +1142,8 @@ int main(void) {
                          tally_x, tally_y, 22, GRAY);
             }
 
-            DrawText("Press ENTER / SPACE / ESC to exit",
-                     cx - 180, sh - 40, 22, DARKGRAY);
+            DrawText("Press ENTER / SPACE / ESC to continue",
+                     cx - 200, sh - 40, 22, DARKGRAY);
 
             EndDrawing();
         }
@@ -1148,8 +1151,10 @@ int main(void) {
 
     if (gcfg.use_llm)
         llm_bot_shutdown();
-    fx_shutdown();
 
+    } /* end session loop */
+
+    fx_shutdown();
     CloseWindow();
     return 0;
 }

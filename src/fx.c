@@ -197,18 +197,18 @@ void fx_explosion(float x, float z) {
     };
     float y0 = 0.25f;
 
-    /* 22 debris particles */
-    for (int i = 0; i < 22; i++) {
+    /* 40 debris particles */
+    for (int i = 0; i < 40; i++) {
         FxParticle *p = alloc_particle();
         if (!p) break;
         float angle = randf(0, 2.0f * 3.14159265f);
-        float speed = randf(1.5f, 6.5f);
+        float speed = randf(2.5f, 10.0f);
         p->pos     = (Vector3){x, y0, z};
-        p->vel     = (Vector3){cosf(angle)*speed, randf(1.2f,5.0f), sinf(angle)*speed};
+        p->vel     = (Vector3){cosf(angle)*speed, randf(2.0f,7.0f), sinf(angle)*speed};
         p->color   = palette[rand() % 5];
-        p->max_life = randf(0.45f, 0.90f);
+        p->max_life = randf(0.6f, 1.2f);
         p->life     = p->max_life;
-        p->size     = randf(0.04f, 0.11f);
+        p->size     = randf(0.06f, 0.18f);
         p->active   = 1;
     }
 
@@ -217,9 +217,9 @@ void fx_explosion(float x, float z) {
     if (r) {
         r->center      = (Vector3){x, 0.04f, z};
         r->color       = (Color){255, 140, 30, 200};
-        r->radius      = 0.15f;
-        r->expand_rate = 3.8f;
-        r->max_life    = 0.38f;
+        r->radius      = 0.25f;
+        r->expand_rate = 7.0f;
+        r->max_life    = 0.5f;
         r->life        = r->max_life;
         r->active      = 1;
     }
@@ -230,9 +230,9 @@ void fx_explosion(float x, float z) {
         flash->pos     = (Vector3){x, y0, z};
         flash->vel     = (Vector3){0, 0, 0};
         flash->color   = (Color){255, 255, 220, 255};
-        flash->max_life = 0.10f;
+        flash->max_life = 0.18f;
         flash->life    = flash->max_life;
-        flash->size    = 0.30f;
+        flash->size    = 0.55f;
         flash->active  = 1;
     }
 }
