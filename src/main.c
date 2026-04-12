@@ -68,6 +68,7 @@ typedef struct {
     float map_size;
     int   num_walls;
     bool  use_llm;
+    bool  opposite_corners;
     int   num_matches;
     int   match_duration;
     char  llm_host[80];
@@ -86,11 +87,12 @@ static float randf(float lo, float hi) {
 
 /* ----------------------------------------------------------------------- */
 static void show_config_screen(GameConfig *cfg) {
-    cfg->map_size       = DEFAULT_MAP_SIZE;
-    cfg->num_walls      = DEFAULT_NUM_WALLS;
-    cfg->use_llm        = false;
-    cfg->num_matches    = DEFAULT_NUM_MATCHES;
-    cfg->match_duration = DEFAULT_MATCH_DURATION;
+    cfg->map_size         = DEFAULT_MAP_SIZE;
+    cfg->num_walls        = DEFAULT_NUM_WALLS;
+    cfg->use_llm          = false;
+    cfg->opposite_corners = true;
+    cfg->num_matches      = DEFAULT_NUM_MATCHES;
+    cfg->match_duration   = DEFAULT_MATCH_DURATION;
     strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
     cfg->llm_port = LLAMA_DEFAULT_PORT;
     for (int s = 0; s < TOTAL_SCRIPTS; s++)
@@ -105,7 +107,7 @@ static void show_config_screen(GameConfig *cfg) {
     const int SH      = GetRenderHeight();
     const int PW      = 520;
     const int ROW_H   = 34;
-    const int ROWS    = TOTAL_SCRIPTS + 9;
+    const int ROWS    = TOTAL_SCRIPTS + 10;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
@@ -146,6 +148,20 @@ static void show_config_screen(GameConfig *cfg) {
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
                        NULL, &cfg->num_walls, 0, 40, edit[1]))
             edit[1] = !edit[1];
+        row++;
+
+        /* Spawn mode toggle */
+        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
+                 "Spawn mode");
+        {
+            const char *spawn_text = cfg->opposite_corners
+                                     ? "Opposite Corners" : "Random";
+            bool opp = cfg->opposite_corners;
+            GuiToggle((Rectangle){(float)CTL_X, (float)ROW_Y + 2,
+                                  (float)CTL_W, (float)(ROW_H - 6)},
+                      spawn_text, &opp);
+            cfg->opposite_corners = opp;
+        }
         row++;
 
         /* LLM section */
@@ -352,8 +368,17 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
             float x, z;
             int tries = 0;
             do {
-                x = randf(-arena_half + 0.5f, arena_half - 0.5f);
-                z = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                if (gcfg->opposite_corners) {
+                    if (s == LLM_SCRIPT_IDX) {
+                        x = randf(arena_half * 0.5f, arena_half - 0.5f);
+                    } else {
+                        x = randf(-arena_half + 0.5f, -arena_half * 0.5f);
+                    }
+                    z = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                } else {
+                    x = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                    z = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                }
                 tries++;
             } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
 

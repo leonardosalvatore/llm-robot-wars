@@ -38,7 +38,7 @@ void walls_generate(float arena_half, int count, unsigned seed) {
 
     for (int i = 0; i < count; i++) {
         Wall w;
-        w.height = 0.75f;
+        w.height = 0.525f;
 
         bool ok = false;
         for (int try = 0; try < 30 && !ok; try++) {
