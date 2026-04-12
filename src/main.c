@@ -70,6 +70,7 @@ typedef struct {
     int   num_walls;
     bool  use_llm;
     bool  opposite_corners;
+    bool  auto_respawn;
     int   num_matches;
     int   match_duration;
     char  llm_host[80];
@@ -94,6 +95,7 @@ static void show_config_screen(GameConfig *cfg) {
     cfg->num_walls        = DEFAULT_NUM_WALLS;
     cfg->use_llm          = false;
     cfg->opposite_corners = true;
+    cfg->auto_respawn     = false;
     cfg->num_matches      = DEFAULT_NUM_MATCHES;
     cfg->match_duration   = DEFAULT_MATCH_DURATION;
     strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
@@ -110,7 +112,7 @@ static void show_config_screen(GameConfig *cfg) {
     const int SH      = GetRenderHeight();
     const int PW      = 520;
     const int ROW_H   = 34;
-    const int ROWS    = TOTAL_SCRIPTS + 11;
+    const int ROWS    = TOTAL_SCRIPTS + 12;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
@@ -174,6 +176,20 @@ static void show_config_screen(GameConfig *cfg) {
                                   (float)CTL_W, (float)(ROW_H - 6)},
                       spawn_text, &opp);
             cfg->opposite_corners = opp;
+        }
+        row++;
+
+        /* Game mode toggle */
+        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
+                 "Game mode");
+        {
+            const char *mode_text = cfg->auto_respawn
+                                    ? "Auto Respawn" : "Match";
+            bool ar = cfg->auto_respawn;
+            GuiToggle((Rectangle){(float)CTL_X, (float)ROW_Y + 2,
+                                  (float)CTL_W, (float)(ROW_H - 6)},
+                      mode_text, &ar);
+            cfg->auto_respawn = ar;
         }
         row++;
 
@@ -355,6 +371,63 @@ typedef struct {
     int  spawn_count[TOTAL_SCRIPTS];
     char llm_load_error[512];
 } MatchState;
+
+static void respawn_team(int script_idx, const GameConfig *gcfg,
+                         float arena_half_x, float arena_half_z)
+{
+    for (int i = 0; i < g_bot_count; i++) {
+        Bot *bot = &g_bots[i];
+        if (bot->script_id != script_idx) continue;
+        if (bot->active) continue;
+
+        float x, z;
+        int tries = 0;
+        do {
+            if (gcfg->opposite_corners) {
+                if (script_idx == LLM_SCRIPT_IDX)
+                    x = randf(arena_half_x * 0.5f, arena_half_x - 0.5f);
+                else
+                    x = randf(-arena_half_x + 0.5f, -arena_half_x * 0.5f);
+                z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
+            } else {
+                x = randf(-arena_half_x + 0.5f, arena_half_x - 0.5f);
+                z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
+            }
+            tries++;
+        } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
+
+        lua_State *L = scripting_load(script_paths[script_idx]);
+        BotConfig cfg;
+        if (L) {
+            scripting_call_init(L, &cfg);
+        } else {
+            cfg.left_weapon  = WEAPON_AUTO_CANNON;
+            cfg.right_weapon = WEAPON_AUTO_CANNON;
+            cfg.armour       = 0;
+            cfg.max_hp       = 100.0f;
+            cfg.max_speed    = 5.0f;
+            cfg.body_scale   = 1.0f;
+        }
+        cfg.script_idx = script_idx;
+
+        Color col = script_colors[script_idx];
+        bot->active    = true;
+        bot->x         = x;
+        bot->y         = 0.0f;
+        bot->z         = z;
+        bot->vx        = 0.0f;
+        bot->vy        = 0.0f;
+        bot->vz        = 0.0f;
+        bot->r         = col.r;
+        bot->g         = col.g;
+        bot->b         = col.b;
+        bot->a         = col.a;
+        bot->hp        = cfg.max_hp;
+        bot->config    = cfg;
+        bot->inertia   = (BotInertia){0};
+        bot->L         = L;
+    }
+}
 
 static void match_setup(MatchState *ms, const GameConfig *gcfg,
                         float arena_half_x, float arena_half_z,
@@ -665,6 +738,8 @@ int main(void) {
         bool  match_over    = false;
         bool  restart_match = false;
         int   alive[TOTAL_SCRIPTS] = {0};
+        int   rounds_llm    = 0;
+        int   rounds_nonllm = 0;
 
         int teams_with_bots = 0;
         for (int s = 0; s < TOTAL_SCRIPTS; s++)
@@ -857,7 +932,14 @@ int main(void) {
                                         alive[s], ms.spawn_count[s]),
                              10, 34 + s * 22, 20, script_colors[s]);
                 }
-                DrawFPS(10, 34 + TOTAL_SCRIPTS * 22 + 4);
+                if (gcfg.auto_respawn) {
+                    DrawText(TextFormat("Rounds  —  LLM: %d   Others: %d",
+                                        rounds_llm, rounds_nonllm),
+                             10, 34 + TOTAL_SCRIPTS * 22 + 4, 20, RAYWHITE);
+                    DrawFPS(10, 34 + TOTAL_SCRIPTS * 22 + 30);
+                } else {
+                    DrawFPS(10, 34 + TOTAL_SCRIPTS * 22 + 4);
+                }
 
                 if (gcfg.use_llm) {
                     LlmVisState vis;
@@ -875,12 +957,25 @@ int main(void) {
                 for (int s = 0; s < TOTAL_SCRIPTS; s++)
                     if (s != LLM_SCRIPT_IDX && alive[s] > 0) non_llm_alive++;
 
-                /* End as soon as the contest is decided:
-                 *   - all LLM bots dead  → non-LLM side wins
-                 *   - no non-LLM bots left → LLM bot wins */
                 if (match_time > 3.0f && teams_with_bots > 1) {
-                    if (llm_alive == 0 || non_llm_alive == 0)
-                        match_over = true;
+                    if (llm_alive == 0 || non_llm_alive == 0) {
+                        if (gcfg.auto_respawn) {
+                            if (llm_alive == 0) {
+                                rounds_nonllm++;
+                                respawn_team(LLM_SCRIPT_IDX, &gcfg,
+                                             arena_half_x, arena_half_z);
+                            }
+                            if (non_llm_alive == 0) {
+                                rounds_llm++;
+                                for (int s = 0; s < TOTAL_SCRIPTS; s++)
+                                    if (s != LLM_SCRIPT_IDX && ms.spawn_count[s] > 0)
+                                        respawn_team(s, &gcfg,
+                                                     arena_half_x, arena_half_z);
+                            }
+                        } else {
+                            match_over = true;
+                        }
+                    }
                 }
                 if (match_time >= (float)gcfg.match_duration)
                     match_over = true;
