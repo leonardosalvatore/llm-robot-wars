@@ -41,7 +41,7 @@ function think(dt)
 
     local enemy, min_dist = nil, math.huge
     for _, t in ipairs(targets) do
-        if t.type == "bot" and t.team ~= self_team and t.distance < min_dist then
+        if t.type == "bot" and t.team == 6 and t.distance < min_dist then
             min_dist = t.distance
             enemy    = t
         end

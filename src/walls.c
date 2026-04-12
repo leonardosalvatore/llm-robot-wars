@@ -25,14 +25,16 @@ static float lcg_randf(unsigned *s, float lo, float hi) {
  * overlap rejection prevents walls from stacking directly on top of each
  * other (up to 20 retry attempts per wall).
  * ----------------------------------------------------------------------- */
-void walls_generate(float arena_half, int count, unsigned seed) {
+void walls_generate(float arena_half_x, float arena_half_z, int count, unsigned seed) {
     g_wall_count = 0;
     if (count <= 0) return;
     if (count > MAX_WALLS) count = MAX_WALLS;
 
-    float margin  = arena_half * 0.12f;   /* keep walls away from edges */
-    float inner   = arena_half - margin;
-    float min_gap = 1.2f;                 /* minimum clear space between walls */
+    float margin_x = arena_half_x * 0.12f;
+    float margin_z = arena_half_z * 0.12f;
+    float inner_x  = arena_half_x - margin_x;
+    float inner_z  = arena_half_z - margin_z;
+    float min_gap  = 1.2f;
 
     unsigned s = seed;
 
@@ -42,11 +44,9 @@ void walls_generate(float arena_half, int count, unsigned seed) {
 
         bool ok = false;
         for (int try = 0; try < 30 && !ok; try++) {
-            w.x = lcg_randf(&s, -inner, inner);
-            w.z = lcg_randf(&s, -inner, inner);
+            w.x = lcg_randf(&s, -inner_x, inner_x);
+            w.z = lcg_randf(&s, -inner_z, inner_z);
 
-            /* Alternate orientation; randomise length in [1.2, 3.5]
-             * Thickness raised to 0.40 so fast projectiles cannot tunnel. */
             if ((i & 1) == 0) {
                 w.hw = lcg_randf(&s, 1.2f, 3.5f);
                 w.hd = 0.40f;
@@ -55,11 +55,10 @@ void walls_generate(float arena_half, int count, unsigned seed) {
                 w.hd = lcg_randf(&s, 1.2f, 3.5f);
             }
 
-            /* Clamp so wall stays inside the arena */
-            if (w.x - w.hw < -inner) w.x = -inner + w.hw;
-            if (w.x + w.hw >  inner) w.x =  inner - w.hw;
-            if (w.z - w.hd < -inner) w.z = -inner + w.hd;
-            if (w.z + w.hd >  inner) w.z =  inner - w.hd;
+            if (w.x - w.hw < -inner_x) w.x = -inner_x + w.hw;
+            if (w.x + w.hw >  inner_x) w.x =  inner_x - w.hw;
+            if (w.z - w.hd < -inner_z) w.z = -inner_z + w.hd;
+            if (w.z + w.hd >  inner_z) w.z =  inner_z - w.hd;
 
             /* Reject if it overlaps an existing wall too closely */
             ok = true;

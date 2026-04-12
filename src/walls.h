@@ -9,7 +9,7 @@ typedef struct {
 
 #define MAX_WALLS 72
 
-void        walls_generate(float arena_half, int count, unsigned seed);
+void        walls_generate(float arena_half_x, float arena_half_z, int count, unsigned seed);
 void        walls_add_border(float arena_half_x, float arena_half_z);
 int         walls_count(void);
 const Wall *walls_get(void);

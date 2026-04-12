@@ -65,7 +65,8 @@ static const Color script_colors[TOTAL_SCRIPTS] = {
 /* ----------------------------------------------------------------------- */
 typedef struct {
     int   bots_per_type[TOTAL_SCRIPTS];
-    float map_size;
+    float map_width;
+    float map_height;
     int   num_walls;
     bool  use_llm;
     bool  opposite_corners;
@@ -76,7 +77,8 @@ typedef struct {
 } GameConfig;
 
 static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 2 };
-static const float DEFAULT_MAP_SIZE             = 30.0f;
+static const float DEFAULT_MAP_WIDTH            = 50.0f;
+static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
 static const int   DEFAULT_MATCH_DURATION       = 50;
 static const int   DEFAULT_NUM_MATCHES          = 10;
@@ -87,7 +89,8 @@ static float randf(float lo, float hi) {
 
 /* ----------------------------------------------------------------------- */
 static void show_config_screen(GameConfig *cfg) {
-    cfg->map_size         = DEFAULT_MAP_SIZE;
+    cfg->map_width        = DEFAULT_MAP_WIDTH;
+    cfg->map_height       = DEFAULT_MAP_HEIGHT;
     cfg->num_walls        = DEFAULT_NUM_WALLS;
     cfg->use_llm          = false;
     cfg->opposite_corners = true;
@@ -107,7 +110,7 @@ static void show_config_screen(GameConfig *cfg) {
     const int SH      = GetRenderHeight();
     const int PW      = 520;
     const int ROW_H   = 34;
-    const int ROWS    = TOTAL_SCRIPTS + 10;
+    const int ROWS    = TOTAL_SCRIPTS + 11;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
@@ -116,10 +119,11 @@ static void show_config_screen(GameConfig *cfg) {
     const int CTL_W   = PW - LBL_W - 30;
     const float FONT_SZ = 20.0f;
 
-    bool edit[4 + TOTAL_SCRIPTS];
-    for (int i = 0; i < 4 + TOTAL_SCRIPTS; i++) edit[i] = false;
+    bool edit[5 + TOTAL_SCRIPTS];
+    for (int i = 0; i < 5 + TOTAL_SCRIPTS; i++) edit[i] = false;
 
-    int map_size_int = (int)cfg->map_size;
+    int map_width_int  = (int)cfg->map_width;
+    int map_height_int = (int)cfg->map_height;
 
     GuiSetStyle(DEFAULT, TEXT_SIZE, (int)FONT_SZ);
 
@@ -133,21 +137,30 @@ static void show_config_screen(GameConfig *cfg) {
         int row = 0;
 #define ROW_Y  (PY + 48 + row * ROW_H)
 
-        /* Map size */
+        /* Map width (X axis — the long side for opposite-corners) */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
-                 "Map size (10-200)");
+                 "Map width (10-200)");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &map_size_int, 10, 200, edit[0]))
+                       NULL, &map_width_int, 10, 200, edit[0]))
             edit[0] = !edit[0];
-        cfg->map_size = (float)map_size_int;
+        cfg->map_width = (float)map_width_int;
+        row++;
+
+        /* Map height (Z axis) */
+        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
+                 "Map height (10-200)");
+        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
+                       NULL, &map_height_int, 10, 200, edit[1]))
+            edit[1] = !edit[1];
+        cfg->map_height = (float)map_height_int;
         row++;
 
         /* Wall count */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Walls (0-40)");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->num_walls, 0, 40, edit[1]))
-            edit[1] = !edit[1];
+                       NULL, &cfg->num_walls, 0, 40, edit[2]))
+            edit[2] = !edit[2];
         row++;
 
         /* Spawn mode toggle */
@@ -202,8 +215,8 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Number of matches");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->num_matches, 1, 100, edit[2]))
-            edit[2] = !edit[2];
+                       NULL, &cfg->num_matches, 1, 100, edit[3]))
+            edit[3] = !edit[3];
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -212,8 +225,8 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Match duration (s)");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->match_duration, 30, 600, edit[3]))
-            edit[3] = !edit[3];
+                       NULL, &cfg->match_duration, 30, 600, edit[4]))
+            edit[4] = !edit[4];
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -231,8 +244,8 @@ static void show_config_screen(GameConfig *cfg) {
                      script_labels[s]);
             if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y,
                                        (float)CTL_W, (float)(ROW_H - 4)},
-                           NULL, &cfg->bots_per_type[s], 0, 30, edit[s + 4]))
-                edit[s + 4] = !edit[s + 4];
+                           NULL, &cfg->bots_per_type[s], 0, 30, edit[s + 5]))
+                edit[s + 5] = !edit[s + 5];
 
             if (s == LLM_SCRIPT_IDX && !cfg->use_llm) {
                 cfg->bots_per_type[s] = 0;
@@ -243,14 +256,14 @@ static void show_config_screen(GameConfig *cfg) {
                 Rectangle r = {(float)CTL_X, (float)ROW_Y,
                                (float)CTL_W, (float)(ROW_H - 4)};
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
-                    edit[s + 4] = false;
+                    edit[s + 5] = false;
             }
             row++;
         }
 
         /* Dismiss spinners on outside click */
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 int ry = PY + 48 + i * ROW_H;
                 Rectangle r = {(float)CTL_X, (float)ry, (float)CTL_W, (float)(ROW_H-4)};
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
@@ -264,7 +277,7 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
                               (float)(PW - 20), (float)ROW_H},
                  TextFormat("Total: %d bots   Map: %d x %d   Walls: %d",
-                            total, map_size_int, map_size_int, cfg->num_walls));
+                            total, map_width_int, map_height_int, cfg->num_walls));
         row++;
 
         /* Start button */
@@ -344,16 +357,17 @@ typedef struct {
 } MatchState;
 
 static void match_setup(MatchState *ms, const GameConfig *gcfg,
-                        float arena_half, unsigned wall_seed)
+                        float arena_half_x, float arena_half_z,
+                        unsigned wall_seed)
 {
     g_bot_count  = 0;
     g_proj_count = 0;
     memset(g_bots,  0, sizeof(g_bots));
     memset(g_projs, 0, sizeof(g_projs));
 
-    update_set_arena(arena_half, arena_half);
-    walls_generate(arena_half, gcfg->num_walls, wall_seed);
-    walls_add_border(arena_half, arena_half);
+    update_set_arena(arena_half_x, arena_half_z);
+    walls_generate(arena_half_x, arena_half_z, gcfg->num_walls, wall_seed);
+    walls_add_border(arena_half_x, arena_half_z);
     scripting_init();
 
     ms->llm_load_error[0] = '\0';
@@ -370,14 +384,14 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
             do {
                 if (gcfg->opposite_corners) {
                     if (s == LLM_SCRIPT_IDX) {
-                        x = randf(arena_half * 0.5f, arena_half - 0.5f);
+                        x = randf(arena_half_x * 0.5f, arena_half_x - 0.5f);
                     } else {
-                        x = randf(-arena_half + 0.5f, -arena_half * 0.5f);
+                        x = randf(-arena_half_x + 0.5f, -arena_half_x * 0.5f);
                     }
-                    z = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                    z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
                 } else {
-                    x = randf(-arena_half + 0.5f, arena_half - 0.5f);
-                    z = randf(-arena_half + 0.5f, arena_half - 0.5f);
+                    x = randf(-arena_half_x + 0.5f, arena_half_x - 0.5f);
+                    z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
                 }
                 tries++;
             } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
@@ -600,8 +614,8 @@ int main(void) {
     GameConfig gcfg;
     show_config_screen(&gcfg);
 
-    float arena_half  = gcfg.map_size * 0.5f;
-    float plane_size  = gcfg.map_size;
+    float arena_half_x = gcfg.map_width  * 0.5f;
+    float arena_half_z = gcfg.map_height * 0.5f;
 
     Camera3D camera = {
         .position   = {40.0f, 40.0f, 40.0f},
@@ -630,7 +644,7 @@ int main(void) {
 
         MatchState ms;
         unsigned wall_seed = (unsigned)time(NULL) + (unsigned)(match_idx * 31337);
-        match_setup(&ms, &gcfg, arena_half, wall_seed);
+        match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed);
         update_reset_llm_stats();
         update_clear_runtime_error();
 
@@ -679,7 +693,21 @@ int main(void) {
             BeginDrawing();
                 ClearBackground(BLACK);
                 BeginMode3D(camera);
-                    DrawPlane((Vector3){0,0,0}, (Vector2){plane_size, plane_size}, DARKGRAY);
+                    DrawPlane((Vector3){0,0,0},
+                             (Vector2){gcfg.map_width, gcfg.map_height}, DARKGRAY);
+
+                    /* Grid */
+                    {
+                        Color grid_col = {45, 45, 45, 255};
+                        float gy = 0.005f;
+                        float step = 2.0f;
+                        for (float gx = -arena_half_x; gx <= arena_half_x; gx += step)
+                            DrawLine3D((Vector3){gx, gy, -arena_half_z},
+                                       (Vector3){gx, gy,  arena_half_z}, grid_col);
+                        for (float gz = -arena_half_z; gz <= arena_half_z; gz += step)
+                            DrawLine3D((Vector3){-arena_half_x, gy, gz},
+                                       (Vector3){ arena_half_x, gy, gz}, grid_col);
+                    }
 
                     /* Walls */
                     {
