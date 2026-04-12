@@ -69,9 +69,5 @@ function think(dt)
         local wx = math.cos(wander_angle) + ax
         local wz = math.sin(wander_angle) + az
         move(wx, wz)
-        if laser_cd <= 0.0 then
-            fire(wx, wz)
-            laser_cd = 0.3
-        end
     end
 end
