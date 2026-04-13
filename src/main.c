@@ -15,8 +15,14 @@
 #include "scripting.h"
 #include "walls.h"
 #include "fx.h"
+#include "colors.h"
+#include "lighting.h"
 #include "llama_bot.h"
 #include "llama_client.h"
+
+#define COLORS_PATH "colors.cfg"
+
+GameColors g_colors;
 
 /* Global game arrays — declared extern in game.h */
 Bot  g_bots[MAX_BOTS];
@@ -52,15 +58,7 @@ static const char *script_labels[TOTAL_SCRIPTS] = {
     "bot_llm",
 };
 
-static const Color script_colors[TOTAL_SCRIPTS] = {
-    {130,255,130,255},
-    {100,230,100,255},
-    { 80,210, 80,255},
-    { 60,190, 60,255},
-    { 50,170, 50,255},
-    { 40,155, 40,255},
-    { 30,230,255,255},
-};
+/* Team colors now live in g_colors.team[] — loaded from colors.cfg */
 
 /* ----------------------------------------------------------------------- */
 typedef struct {
@@ -201,7 +199,7 @@ static void show_config_screen(GameConfig *cfg) {
 
     while (!WindowShouldClose()) {
         BeginDrawing();
-        ClearBackground((Color){20, 20, 30, 255});
+        ClearBackground(g_colors.bg_config);
 
         GuiPanel((Rectangle){(float)PX, (float)PY, (float)PW, (float)PH},
                  "LlamaWars — Configuration");
@@ -402,7 +400,7 @@ static void draw_bot(float cx, float cz, Color color,
         rlTranslatef(cx, 0.0f, cz);
         rlRotatef(body_deg, 0.0f, 1.0f, 0.0f);
 
-        Color trk_col = {75, 75, 75, 255};
+        Color trk_col = g_colors.bot_tread;
         DrawCube((Vector3){0, trk_y, 0}, trk_sz, trk_h, trk_sz, trk_col);
         DrawCubeWires((Vector3){0, trk_y, 0}, trk_sz, trk_h, trk_sz, BLACK);
 
@@ -420,7 +418,7 @@ static void draw_bot(float cx, float cz, Color color,
                (cfg->right_weapon == WEAPON_AUTO_CANNON)  ? CUBE_SIZE * 0.25f :
                                                              CUBE_SIZE * 0.50f;
 
-    Color wcolor = {130, 130, 130, 255};
+    Color wcolor = g_colors.bot_weapon;
     rlPushMatrix();
         rlTranslatef(cx, bod_y, cz);
         rlRotatef(turret_deg, 0.0f, 1.0f, 0.0f);
@@ -473,7 +471,7 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
         }
         cfg.script_idx = script_idx;
 
-        Color col = script_colors[script_idx];
+        Color col = g_colors.team[script_idx];
         bot->active    = true;
         bot->x         = x;
         bot->y         = 0.0f;
@@ -510,7 +508,7 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
     for (int s = 0; s < TOTAL_SCRIPTS; s++) {
         int n = gcfg->bots_per_type[s];
         ms->spawn_count[s] = n;
-        Color col = script_colors[s];
+        Color col = g_colors.team[s];
 
         for (int b = 0; b < n; b++) {
             if (g_bot_count >= MAX_BOTS) break;
@@ -704,7 +702,7 @@ static void show_match_result(const MatchStats *ms, bool llm_busy, bool is_last)
         elapsed += GetFrameTime();
 
         BeginDrawing();
-        ClearBackground((Color){10, 15, 25, 255});
+        ClearBackground(g_colors.bg_results);
 
         int cx = GetRenderWidth()  / 2;
         int cy = GetRenderHeight() / 2;
@@ -746,6 +744,10 @@ int main(void) {
     InitWindow(1920, 1080, "LlamaWars");
     SetTargetFPS(60);
     fx_init();
+    lighting_init();
+
+    colors_set_defaults(&g_colors);
+    colors_load(&g_colors, COLORS_PATH);
 
     GameConfig gcfg;
     config_set_defaults(&gcfg);
@@ -836,10 +838,13 @@ int main(void) {
 
             float wheel = GetMouseWheelMove();
             camera->fovy -= wheel * 3.0f;
-            if (IsKeyDown(KEY_E)) camera->fovy -= ZOOM_SPEED * dt;
-            if (IsKeyDown(KEY_Q)) camera->fovy += ZOOM_SPEED * dt;
+            if (IsKeyDown(KEY_Q)) camera->fovy -= ZOOM_SPEED * dt;
+            if (IsKeyDown(KEY_E)) camera->fovy += ZOOM_SPEED * dt;
             if (camera->fovy < ZOOM_MIN) camera->fovy = ZOOM_MIN;
             if (camera->fovy > ZOOM_MAX) camera->fovy = ZOOM_MAX;
+
+            if (IsKeyDown(KEY_Z)) { camera->position.y += CAM_SPEED * dt; camera->target.y += CAM_SPEED * dt; }
+            if (IsKeyDown(KEY_X)) { camera->position.y -= CAM_SPEED * dt; camera->target.y -= CAM_SPEED * dt; }
 
             if (IsKeyPressed(KEY_F))      ToggleFullscreen();
             if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
@@ -852,28 +857,20 @@ int main(void) {
             update_movement(g_bots, g_bot_count, dt);
             update_projectiles(g_projs, &g_proj_count, g_bots, g_bot_count, dt);
             fx_update(dt);
+            lighting_update(dt);
 
             /* ---- Render ------------------------------------------------- */
             BeginDrawing();
-                ClearBackground(BLACK);
+                ClearBackground(g_colors.bg_clear);
                 BeginMode3D(*camera);
+
+                    /* Lit geometry: terrain + walls */
+                    lighting_begin(*camera);
+
                     DrawPlane((Vector3){0,0,0},
-                             (Vector2){gcfg.map_width, gcfg.map_height}, DARKGRAY);
+                             (Vector2){gcfg.map_width, gcfg.map_height},
+                             g_colors.terrain);
 
-                    /* Grid */
-                    {
-                        Color grid_col = {45, 45, 45, 255};
-                        float gy = 0.005f;
-                        float step = 2.0f;
-                        for (float gx = -arena_half_x; gx <= arena_half_x; gx += step)
-                            DrawLine3D((Vector3){gx, gy, -arena_half_z},
-                                       (Vector3){gx, gy,  arena_half_z}, grid_col);
-                        for (float gz = -arena_half_z; gz <= arena_half_z; gz += step)
-                            DrawLine3D((Vector3){-arena_half_x, gy, gz},
-                                       (Vector3){ arena_half_x, gy, gz}, grid_col);
-                    }
-
-                    /* Walls */
                     {
                         int        wn = walls_count();
                         const Wall *wv = walls_get();
@@ -886,12 +883,41 @@ int main(void) {
                             float wh  = wv[wi].height;
                             float wcy = wh * 0.5f;
                             Color fill = (wi >= border_start)
-                                         ? (Color){50,  55,  70, 255}
-                                         : (Color){90,  80,  70, 255};
-                            Color wire = (wi >= border_start)
-                                         ? (Color){30,  35,  50, 255}
-                                         : (Color){60,  55,  50, 255};
+                                         ? g_colors.border_fill
+                                         : g_colors.wall_fill;
                             DrawCube((Vector3){wcx, wcy, wcz}, ww, wh, wd, fill);
+                        }
+                    }
+
+                    lighting_end();
+
+                    /* Grid (unlit — lines have no normals) */
+                    {
+                        float gy = 0.005f;
+                        float step = 2.0f;
+                        for (float gx = -arena_half_x; gx <= arena_half_x; gx += step)
+                            DrawLine3D((Vector3){gx, gy, -arena_half_z},
+                                       (Vector3){gx, gy,  arena_half_z}, g_colors.grid);
+                        for (float gz = -arena_half_z; gz <= arena_half_z; gz += step)
+                            DrawLine3D((Vector3){-arena_half_x, gy, gz},
+                                       (Vector3){ arena_half_x, gy, gz}, g_colors.grid);
+                    }
+
+                    /* Wall wireframe (unlit) */
+                    {
+                        int        wn = walls_count();
+                        const Wall *wv = walls_get();
+                        int border_start = wn - 4;
+                        for (int wi = 0; wi < wn; wi++) {
+                            float wcx = wv[wi].x;
+                            float wcz = wv[wi].z;
+                            float ww  = wv[wi].hw * 2.0f;
+                            float wd  = wv[wi].hd * 2.0f;
+                            float wh  = wv[wi].height;
+                            float wcy = wh * 0.5f;
+                            Color wire = (wi >= border_start)
+                                         ? g_colors.border_wire
+                                         : g_colors.wall_wire;
                             DrawCubeWires((Vector3){wcx, wcy, wcz}, ww, wh, wd, wire);
                         }
                     }
@@ -927,13 +953,14 @@ int main(void) {
                                            ? (b->hp / base_hp) : 1.0f;
                         float fill_w  = BAR_W * frac;
                         float fill_cx = -BAR_W * 0.5f + fill_w * 0.5f;
-                        Color bar_col = frac > 0.6f ? GREEN
-                                      : frac > 0.3f ? YELLOW : RED;
+                        Color bar_col = frac > 0.6f ? g_colors.hp_full
+                                      : frac > 0.3f ? g_colors.hp_mid
+                                                     : g_colors.hp_low;
                         rlPushMatrix();
                             rlTranslatef(b->x, bar_base_y, b->z);
                             rlRotatef(45.0f, 0, 1, 0);
                             DrawCube((Vector3){0,0,0}, BAR_W, BAR_H, BAR_D,
-                                     (Color){20,20,20,200});
+                                     g_colors.hp_bg);
                             if (fill_w > 0.0f)
                                 DrawCube((Vector3){fill_cx, 0, 0},
                                          fill_w, BAR_H, BAR_D, bar_col);
@@ -953,11 +980,11 @@ int main(void) {
                                 rlTranslatef(b->x, ay, b->z);
                                 rlRotatef(45.0f, 0, 1, 0);
                                 DrawCube((Vector3){0,0,0}, BAR_W, ah, BAR_D,
-                                         (Color){20,20,20,200});
+                                         g_colors.armour_bg);
                                 if (afillw > 0.0f)
                                     DrawCube((Vector3){afillx,0,0},
                                              afillw, ah, BAR_D,
-                                             (Color){180,180,255,255});
+                                             g_colors.armour_fill);
                             rlPopMatrix();
                         }
                     }
@@ -974,7 +1001,7 @@ int main(void) {
                                           p->z - p->dir_z * half},
                                 (Vector3){p->x + p->dir_x * half, py,
                                           p->z + p->dir_z * half},
-                                RED);
+                                g_colors.laser);
                         } else {
                             Color col = {p->r, p->g, p->b, p->a};
                             DrawSphere((Vector3){p->x, py, p->z},
@@ -988,11 +1015,11 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD pan  Q/E zoom  C camera  T scan  F full  R restart  ESC quit"
+                    ? TextFormat("WASD pan  Q/E zoom  Z/X height  C camera  T scan  F full  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD pan  Q/E zoom  C camera  T scan  F full  R restart  ESC quit";
+                    : "WASD pan  Q/E zoom  Z/X height  C camera  T scan  F full  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
@@ -1000,7 +1027,7 @@ int main(void) {
                     DrawText(TextFormat("%-16s %d / %d",
                                         script_labels[s],
                                         alive[s], ms.spawn_count[s]),
-                             10, 34 + s * 22, 20, script_colors[s]);
+                             10, 34 + s * 22, 20, g_colors.team[s]);
                 }
                 if (gcfg.auto_respawn) {
                     DrawText(TextFormat("Rounds  —  LLM: %d   Others: %d",
@@ -1021,7 +1048,7 @@ int main(void) {
             EndDrawing();
 
             /* Check match-end conditions */
-            if (gcfg.use_llm) {
+            {
                 int llm_alive   = alive[LLM_SCRIPT_IDX];
                 int non_llm_alive = 0;
                 for (int s = 0; s < TOTAL_SCRIPTS; s++)
@@ -1047,7 +1074,8 @@ int main(void) {
                         }
                     }
                 }
-                if (match_time >= (float)gcfg.match_duration)
+                if (gcfg.use_llm &&
+                    match_time >= (float)gcfg.match_duration)
                     match_over = true;
             }
         } /* end inner loop */
@@ -1129,6 +1157,7 @@ int main(void) {
             if (match_idx >= gcfg.num_matches)
                 outer_done = true;
         } else {
+            match_idx++;
             outer_done = true;
         }
 
@@ -1169,7 +1198,7 @@ int main(void) {
                !IsKeyPressed(KEY_ENTER) && !IsKeyPressed(KEY_SPACE)) {
 
             BeginDrawing();
-            ClearBackground((Color){10, 15, 25, 255});
+            ClearBackground(g_colors.bg_results);
 
             int sw = GetRenderWidth();
             int sh = GetRenderHeight();
@@ -1193,7 +1222,7 @@ int main(void) {
                 Color wc = LIGHTGRAY;
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
                     if (strcmp(match_winners[m], script_labels[s]) == 0) {
-                        wc = script_colors[s];
+                        wc = g_colors.team[s];
                         break;
                     }
                 }
@@ -1208,7 +1237,7 @@ int main(void) {
             for (int s = 0; s < TOTAL_SCRIPTS; s++) {
                 if (win_count[s] == 0) continue;
                 DrawText(TextFormat("%-18s %d", script_labels[s], win_count[s]),
-                         tally_x, tally_y, 22, script_colors[s]);
+                         tally_x, tally_y, 22, g_colors.team[s]);
                 tally_y += 28;
             }
             if (timeouts > 0) {
@@ -1228,6 +1257,7 @@ int main(void) {
 
     } /* end session loop */
 
+    lighting_shutdown();
     fx_shutdown();
     CloseWindow();
     return 0;

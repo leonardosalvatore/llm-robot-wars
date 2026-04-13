@@ -55,6 +55,8 @@ add_executable(llama-wars
     src/update.c
     src/scripting.c
     src/walls.c
+    src/colors.c
+    src/lighting.c
     llm/llama_client.c
     llm/llama_bot.c
 )
@@ -88,4 +90,12 @@ add_custom_command(TARGET llama-wars POST_BUILD
         "${CMAKE_SOURCE_DIR}/llama-wars.cfg"
         "$<TARGET_FILE_DIR:llama-wars>/llama-wars.cfg"
     COMMENT "Copying default config to build directory"
+)
+
+# Copy default colors config
+add_custom_command(TARGET llama-wars POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/colors.cfg"
+        "$<TARGET_FILE_DIR:llama-wars>/colors.cfg"
+    COMMENT "Copying colors config to build directory"
 )

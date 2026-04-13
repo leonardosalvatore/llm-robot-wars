@@ -1,4 +1,6 @@
 #include "fx.h"
+#include "colors.h"
+#include "lighting.h"
 #include "rlgl.h"
 
 #include <math.h>
@@ -190,11 +192,6 @@ void fx_impact(float x, float y, float z, Color col) {
  * Explosion — bot is destroyed
  * ----------------------------------------------------------------------- */
 void fx_explosion(float x, float z) {
-    static const Color palette[] = {
-        {255,  70, 10, 255}, {255, 140, 30, 255},
-        {255, 220, 60, 255}, {200,  40,  5, 255},
-        {255, 255, 90, 255},
-    };
     float y0 = 0.25f;
 
     /* 40 debris particles */
@@ -205,7 +202,7 @@ void fx_explosion(float x, float z) {
         float speed = randf(2.5f, 10.0f);
         p->pos     = (Vector3){x, y0, z};
         p->vel     = (Vector3){cosf(angle)*speed, randf(2.0f,7.0f), sinf(angle)*speed};
-        p->color   = palette[rand() % 5];
+        p->color   = g_colors.explosion[rand() % 5];
         p->max_life = randf(0.6f, 1.2f);
         p->life     = p->max_life;
         p->size     = randf(0.06f, 0.18f);
@@ -216,7 +213,7 @@ void fx_explosion(float x, float z) {
     FxRing *r = alloc_ring();
     if (r) {
         r->center      = (Vector3){x, 0.04f, z};
-        r->color       = (Color){255, 140, 30, 200};
+        r->color       = g_colors.explosion_ring;
         r->radius      = 0.25f;
         r->expand_rate = 7.0f;
         r->max_life    = 0.5f;
@@ -229,10 +226,12 @@ void fx_explosion(float x, float z) {
     if (flash) {
         flash->pos     = (Vector3){x, y0, z};
         flash->vel     = (Vector3){0, 0, 0};
-        flash->color   = (Color){255, 255, 220, 255};
+        flash->color   = g_colors.explosion_flash;
         flash->max_life = 0.18f;
         flash->life    = flash->max_life;
         flash->size    = 0.55f;
         flash->active  = 1;
     }
+
+    lighting_add_explosion(x, z);
 }
