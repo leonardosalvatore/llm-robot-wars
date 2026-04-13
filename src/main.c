@@ -66,6 +66,7 @@ typedef struct {
     float map_width;
     float map_height;
     int   num_walls;
+    int   wall_size;
     bool  use_llm;
     bool  opposite_corners;
     bool  auto_respawn;
@@ -92,6 +93,7 @@ static void config_set_defaults(GameConfig *cfg) {
     cfg->map_width        = DEFAULT_MAP_WIDTH;
     cfg->map_height       = DEFAULT_MAP_HEIGHT;
     cfg->num_walls        = DEFAULT_NUM_WALLS;
+    cfg->wall_size        = 1;
     cfg->use_llm          = false;
     cfg->opposite_corners = true;
     cfg->auto_respawn     = false;
@@ -120,6 +122,7 @@ static bool config_load(GameConfig *cfg, const char *path) {
         if      (strcmp(key, "map_width")       == 0) cfg->map_width  = (float)atoi(val);
         else if (strcmp(key, "map_height")      == 0) cfg->map_height = (float)atoi(val);
         else if (strcmp(key, "walls")           == 0) cfg->num_walls  = atoi(val);
+        else if (strcmp(key, "wall_size")       == 0) cfg->wall_size  = atoi(val);
         else if (strcmp(key, "spawn_mode")      == 0) cfg->opposite_corners = (strstr(val, "corner") != NULL);
         else if (strcmp(key, "game_mode")       == 0) cfg->auto_respawn = (strstr(val, "respawn") != NULL);
         else if (strcmp(key, "num_matches")     == 0) cfg->num_matches = atoi(val);
@@ -148,6 +151,7 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "map_width        = %-4d # 10-200\n",  (int)cfg->map_width);
     fprintf(f, "map_height       = %-4d # 10-200\n",  (int)cfg->map_height);
     fprintf(f, "walls            = %-4d # 0-40\n",    cfg->num_walls);
+    fprintf(f, "wall_size        = %-4d # 1-5 (1=line, 2-5=rectangle)\n", cfg->wall_size);
     fprintf(f, "spawn_mode       = %-8s # corners | random\n",
             cfg->opposite_corners ? "corners" : "random");
     fprintf(f, "game_mode        = %-8s # match | respawn\n",
@@ -180,7 +184,7 @@ static void show_config_screen(GameConfig *cfg) {
     const int SH      = GetRenderHeight();
     const int PW      = 520;
     const int ROW_H   = 34;
-    const int ROWS    = TOTAL_SCRIPTS + 12;
+    const int ROWS    = TOTAL_SCRIPTS + 13;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
@@ -189,8 +193,8 @@ static void show_config_screen(GameConfig *cfg) {
     const int CTL_W   = PW - LBL_W - 30;
     const float FONT_SZ = 20.0f;
 
-    bool edit[5 + TOTAL_SCRIPTS];
-    for (int i = 0; i < 5 + TOTAL_SCRIPTS; i++) edit[i] = false;
+    bool edit[6 + TOTAL_SCRIPTS];
+    for (int i = 0; i < 6 + TOTAL_SCRIPTS; i++) edit[i] = false;
 
     int map_width_int  = (int)cfg->map_width;
     int map_height_int = (int)cfg->map_height;
@@ -231,6 +235,14 @@ static void show_config_screen(GameConfig *cfg) {
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
                        NULL, &cfg->num_walls, 0, 40, edit[2]))
             edit[2] = !edit[2];
+        row++;
+
+        /* Wall size */
+        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
+                 "Wall size (1-5)");
+        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
+                       NULL, &cfg->wall_size, 1, 5, edit[3]))
+            edit[3] = !edit[3];
         row++;
 
         /* Spawn mode toggle */
@@ -299,8 +311,8 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Number of matches");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->num_matches, 1, 100, edit[3]))
-            edit[3] = !edit[3];
+                       NULL, &cfg->num_matches, 1, 100, edit[4]))
+            edit[4] = !edit[4];
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -309,8 +321,8 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Match duration (s)");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->match_duration, 30, 600, edit[4]))
-            edit[4] = !edit[4];
+                       NULL, &cfg->match_duration, 30, 600, edit[5]))
+            edit[5] = !edit[5];
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -326,21 +338,21 @@ static void show_config_screen(GameConfig *cfg) {
                      script_labels[s]);
             if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y,
                                        (float)CTL_W, (float)(ROW_H - 4)},
-                           NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 5]))
-                edit[s + 5] = !edit[s + 5];
+                           NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 6]))
+                edit[s + 6] = !edit[s + 6];
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
                 Rectangle r = {(float)CTL_X, (float)ROW_Y,
                                (float)CTL_W, (float)(ROW_H - 4)};
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
-                    edit[s + 5] = false;
+                    edit[s + 6] = false;
             }
             row++;
         }
 
         /* Dismiss spinners on outside click */
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 6; i++) {
                 int ry = PY + 48 + i * ROW_H;
                 Rectangle r = {(float)CTL_X, (float)ry, (float)CTL_W, (float)(ROW_H-4)};
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
@@ -609,7 +621,7 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
     memset(g_projs, 0, sizeof(g_projs));
 
     update_set_arena(arena_half_x, arena_half_z);
-    walls_generate(arena_half_x, arena_half_z, gcfg->num_walls, wall_seed);
+    walls_generate(arena_half_x, arena_half_z, gcfg->num_walls, gcfg->wall_size, wall_seed);
     walls_add_border(arena_half_x, arena_half_z);
     scripting_init();
 

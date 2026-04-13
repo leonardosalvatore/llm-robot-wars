@@ -25,16 +25,27 @@ static float lcg_randf(unsigned *s, float lo, float hi) {
  * overlap rejection prevents walls from stacking directly on top of each
  * other (up to 20 retry attempts per wall).
  * ----------------------------------------------------------------------- */
-void walls_generate(float arena_half_x, float arena_half_z, int count, unsigned seed) {
+static float snap_grid(float v, float step) {
+    return floorf(v / step + 0.5f) * step;
+}
+
+void walls_generate(float arena_half_x, float arena_half_z,
+                    int count, int wall_size, unsigned seed)
+{
     g_wall_count = 0;
     if (count <= 0) return;
     if (count > MAX_WALLS) count = MAX_WALLS;
+
+    const float GRID = 2.0f;
 
     float margin_x = arena_half_x * 0.12f;
     float margin_z = arena_half_z * 0.12f;
     float inner_x  = arena_half_x - margin_x;
     float inner_z  = arena_half_z - margin_z;
     float min_gap  = 1.2f;
+
+    if (wall_size < 1) wall_size = 1;
+    if (wall_size > 5) wall_size = 5;
 
     unsigned s = seed;
 
@@ -44,15 +55,30 @@ void walls_generate(float arena_half_x, float arena_half_z, int count, unsigned 
 
         bool ok = false;
         for (int try = 0; try < 30 && !ok; try++) {
-            w.x = lcg_randf(&s, -inner_x, inner_x);
-            w.z = lcg_randf(&s, -inner_z, inner_z);
+            w.x = snap_grid(lcg_randf(&s, -inner_x, inner_x), GRID);
+            w.z = snap_grid(lcg_randf(&s, -inner_z, inner_z), GRID);
 
-            if ((i & 1) == 0) {
-                w.hw = lcg_randf(&s, 1.2f, 3.5f);
-                w.hd = 0.40f;
+            if (wall_size <= 1) {
+                /* Thin line walls (original behaviour) */
+                if ((i & 1) == 0) {
+                    w.hw = snap_grid(lcg_randf(&s, 1.2f, 3.5f), GRID * 0.5f);
+                    w.hd = 0.40f;
+                } else {
+                    w.hw = 0.40f;
+                    w.hd = snap_grid(lcg_randf(&s, 1.2f, 3.5f), GRID * 0.5f);
+                }
             } else {
-                w.hw = 0.40f;
-                w.hd = lcg_randf(&s, 1.2f, 3.5f);
+                /* Rectangular walls — both axes get real extent */
+                float base = (float)wall_size * GRID * 0.5f;
+                if ((i & 1) == 0) {
+                    w.hw = snap_grid(lcg_randf(&s, base * 0.5f, base), GRID * 0.5f);
+                    w.hd = snap_grid(lcg_randf(&s, base * 0.3f, base * 0.7f), GRID * 0.5f);
+                } else {
+                    w.hw = snap_grid(lcg_randf(&s, base * 0.3f, base * 0.7f), GRID * 0.5f);
+                    w.hd = snap_grid(lcg_randf(&s, base * 0.5f, base), GRID * 0.5f);
+                }
+                if (w.hw < GRID * 0.5f) w.hw = GRID * 0.5f;
+                if (w.hd < GRID * 0.5f) w.hd = GRID * 0.5f;
             }
 
             if (w.x - w.hw < -inner_x) w.x = -inner_x + w.hw;
@@ -60,7 +86,6 @@ void walls_generate(float arena_half_x, float arena_half_z, int count, unsigned 
             if (w.z - w.hd < -inner_z) w.z = -inner_z + w.hd;
             if (w.z + w.hd >  inner_z) w.z =  inner_z - w.hd;
 
-            /* Reject if it overlaps an existing wall too closely */
             ok = true;
             for (int j = 0; j < g_wall_count; j++) {
                 float dx = fabsf(w.x - g_walls[j].x);
