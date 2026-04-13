@@ -88,6 +88,89 @@ static float randf(float lo, float hi) {
     return lo + (float)rand() / (float)RAND_MAX * (hi - lo);
 }
 
+#define CFG_PATH "llama-wars.cfg"
+
+static void config_set_defaults(GameConfig *cfg) {
+    cfg->map_width        = DEFAULT_MAP_WIDTH;
+    cfg->map_height       = DEFAULT_MAP_HEIGHT;
+    cfg->num_walls        = DEFAULT_NUM_WALLS;
+    cfg->use_llm          = false;
+    cfg->opposite_corners = true;
+    cfg->auto_respawn     = false;
+    cfg->num_matches      = DEFAULT_NUM_MATCHES;
+    cfg->match_duration   = DEFAULT_MATCH_DURATION;
+    strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
+    cfg->llm_port = LLAMA_DEFAULT_PORT;
+    for (int s = 0; s < TOTAL_SCRIPTS; s++)
+        cfg->bots_per_type[s] = DEFAULT_BOTS[s];
+}
+
+static bool config_load(GameConfig *cfg, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char key[64] = {0};
+        char val[128] = {0};
+        if (sscanf(line, " %63[a-z_] = %127[^\n]", key, val) != 2) continue;
+        char *comment = strchr(val, '#');
+        if (comment) *comment = '\0';
+        while (strlen(val) > 0 && val[strlen(val)-1] == ' ') val[strlen(val)-1] = '\0';
+
+        if      (strcmp(key, "map_width")       == 0) cfg->map_width  = (float)atoi(val);
+        else if (strcmp(key, "map_height")      == 0) cfg->map_height = (float)atoi(val);
+        else if (strcmp(key, "walls")           == 0) cfg->num_walls  = atoi(val);
+        else if (strcmp(key, "spawn_mode")      == 0) cfg->opposite_corners = (strstr(val, "corner") != NULL);
+        else if (strcmp(key, "game_mode")       == 0) cfg->auto_respawn = (strstr(val, "respawn") != NULL);
+        else if (strcmp(key, "num_matches")     == 0) cfg->num_matches = atoi(val);
+        else if (strcmp(key, "match_duration")  == 0) cfg->match_duration = atoi(val);
+        else if (strcmp(key, "bot_light")       == 0) cfg->bots_per_type[0] = atoi(val);
+        else if (strcmp(key, "bot_skirmisher")  == 0) cfg->bots_per_type[1] = atoi(val);
+        else if (strcmp(key, "bot_chaser")      == 0) cfg->bots_per_type[2] = atoi(val);
+        else if (strcmp(key, "bot_duelist")     == 0) cfg->bots_per_type[3] = atoi(val);
+        else if (strcmp(key, "bot_lancer")      == 0) cfg->bots_per_type[4] = atoi(val);
+        else if (strcmp(key, "bot_fortress")    == 0) cfg->bots_per_type[5] = atoi(val);
+        else if (strcmp(key, "bot_llm")         == 0) cfg->bots_per_type[6] = atoi(val);
+        else if (strcmp(key, "llm_host")        == 0) {
+            while (*val && val[strlen(val)-1] == ' ') val[strlen(val)-1] = '\0';
+            strncpy(cfg->llm_host, val, sizeof(cfg->llm_host) - 1);
+        }
+        else if (strcmp(key, "llm_port")        == 0) cfg->llm_port = atoi(val);
+    }
+    fclose(f);
+    return true;
+}
+
+static void config_save(const GameConfig *cfg, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+
+    fprintf(f, "map_width        = %-4d # 10-200\n",  (int)cfg->map_width);
+    fprintf(f, "map_height       = %-4d # 10-200\n",  (int)cfg->map_height);
+    fprintf(f, "walls            = %-4d # 0-40\n",    cfg->num_walls);
+    fprintf(f, "spawn_mode       = %-8s # corners | random\n",
+            cfg->opposite_corners ? "corners" : "random");
+    fprintf(f, "game_mode        = %-8s # match | respawn\n",
+            cfg->auto_respawn ? "respawn" : "match");
+    fprintf(f, "num_matches      = %-4d # 1-100\n",   cfg->num_matches);
+    fprintf(f, "match_duration   = %-4d # 30-600\n",  cfg->match_duration);
+    fprintf(f, "\n");
+    fprintf(f, "bot_light        = %-4d # 0-30\n", cfg->bots_per_type[0]);
+    fprintf(f, "bot_skirmisher   = %-4d # 0-30\n", cfg->bots_per_type[1]);
+    fprintf(f, "bot_chaser       = %-4d # 0-30\n", cfg->bots_per_type[2]);
+    fprintf(f, "bot_duelist      = %-4d # 0-30\n", cfg->bots_per_type[3]);
+    fprintf(f, "bot_lancer       = %-4d # 0-30\n", cfg->bots_per_type[4]);
+    fprintf(f, "bot_fortress     = %-4d # 0-30\n", cfg->bots_per_type[5]);
+    fprintf(f, "bot_llm          = %-4d # 0-30\n", cfg->bots_per_type[6]);
+    fprintf(f, "\n");
+    fprintf(f, "llm_host         = %s\n", cfg->llm_host);
+    fprintf(f, "llm_port         = %-4d # 1-65535\n", cfg->llm_port);
+
+    fclose(f);
+}
+
 /* ----------------------------------------------------------------------- */
 static void show_config_screen(GameConfig *cfg) {
     /* Probe llama-server health each time the config screen is shown */
@@ -665,18 +748,8 @@ int main(void) {
     fx_init();
 
     GameConfig gcfg;
-    gcfg.map_width        = DEFAULT_MAP_WIDTH;
-    gcfg.map_height       = DEFAULT_MAP_HEIGHT;
-    gcfg.num_walls        = DEFAULT_NUM_WALLS;
-    gcfg.use_llm          = false;
-    gcfg.opposite_corners = true;
-    gcfg.auto_respawn     = false;
-    gcfg.num_matches      = DEFAULT_NUM_MATCHES;
-    gcfg.match_duration   = DEFAULT_MATCH_DURATION;
-    strncpy(gcfg.llm_host, LLAMA_DEFAULT_HOST, sizeof(gcfg.llm_host) - 1);
-    gcfg.llm_port = LLAMA_DEFAULT_PORT;
-    for (int s = 0; s < TOTAL_SCRIPTS; s++)
-        gcfg.bots_per_type[s] = DEFAULT_BOTS[s];
+    config_set_defaults(&gcfg);
+    config_load(&gcfg, CFG_PATH);
 
     Vector3 pan_right   = Vector3Normalize((Vector3){1.0f, 0.0f, -1.0f});
     Vector3 pan_forward = Vector3Normalize((Vector3){1.0f, 0.0f,  1.0f});
@@ -689,6 +762,7 @@ int main(void) {
 
     show_config_screen(&gcfg);
     if (WindowShouldClose()) break;
+    config_save(&gcfg, CFG_PATH);
 
     float arena_half_x = gcfg.map_width  * 0.5f;
     float arena_half_z = gcfg.map_height * 0.5f;

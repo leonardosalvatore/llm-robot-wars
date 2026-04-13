@@ -81,3 +81,11 @@ add_custom_command(TARGET llama-wars POST_BUILD
         "$<TARGET_FILE_DIR:llama-wars>/scripts"
     COMMENT "Copying bot scripts to build directory"
 )
+
+# Copy default config if not already present in build dir
+add_custom_command(TARGET llama-wars POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/llama-wars.cfg"
+        "$<TARGET_FILE_DIR:llama-wars>/llama-wars.cfg"
+    COMMENT "Copying default config to build directory"
+)
