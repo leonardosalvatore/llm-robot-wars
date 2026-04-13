@@ -4,8 +4,8 @@
 
 #define CUBE_SIZE 0.4f
 
-#define MAX_BOTS        128
-#define MAX_PROJECTILES 512
+#define MAX_BOTS        512
+#define MAX_PROJECTILES 2048
 #define TOTAL_SCRIPTS     7
 #define LLM_SCRIPT_IDX    6
 #define MAX_SCAN_HITS    64

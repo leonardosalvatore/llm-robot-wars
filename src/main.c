@@ -155,13 +155,13 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "num_matches      = %-4d # 1-100\n",   cfg->num_matches);
     fprintf(f, "match_duration   = %-4d # 30-600\n",  cfg->match_duration);
     fprintf(f, "\n");
-    fprintf(f, "bot_light        = %-4d # 0-30\n", cfg->bots_per_type[0]);
-    fprintf(f, "bot_skirmisher   = %-4d # 0-30\n", cfg->bots_per_type[1]);
-    fprintf(f, "bot_chaser       = %-4d # 0-30\n", cfg->bots_per_type[2]);
-    fprintf(f, "bot_duelist      = %-4d # 0-30\n", cfg->bots_per_type[3]);
-    fprintf(f, "bot_lancer       = %-4d # 0-30\n", cfg->bots_per_type[4]);
-    fprintf(f, "bot_fortress     = %-4d # 0-30\n", cfg->bots_per_type[5]);
-    fprintf(f, "bot_llm          = %-4d # 0-30\n", cfg->bots_per_type[6]);
+    fprintf(f, "bot_light        = %-4d # 0-60\n", cfg->bots_per_type[0]);
+    fprintf(f, "bot_skirmisher   = %-4d # 0-60\n", cfg->bots_per_type[1]);
+    fprintf(f, "bot_chaser       = %-4d # 0-60\n", cfg->bots_per_type[2]);
+    fprintf(f, "bot_duelist      = %-4d # 0-60\n", cfg->bots_per_type[3]);
+    fprintf(f, "bot_lancer       = %-4d # 0-60\n", cfg->bots_per_type[4]);
+    fprintf(f, "bot_fortress     = %-4d # 0-60\n", cfg->bots_per_type[5]);
+    fprintf(f, "bot_llm          = %-4d # 0-60\n", cfg->bots_per_type[6]);
     fprintf(f, "\n");
     fprintf(f, "llm_host         = %s\n", cfg->llm_host);
     fprintf(f, "llm_port         = %-4d # 1-65535\n", cfg->llm_port);
@@ -326,7 +326,7 @@ static void show_config_screen(GameConfig *cfg) {
                      script_labels[s]);
             if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y,
                                        (float)CTL_W, (float)(ROW_H - 4)},
-                           NULL, &cfg->bots_per_type[s], 0, 30, edit[s + 5]))
+                           NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 5]))
                 edit[s + 5] = !edit[s + 5];
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
@@ -369,6 +369,115 @@ static void show_config_screen(GameConfig *cfg) {
 
         EndDrawing();
     }
+}
+
+/* ----------------------------------------------------------------------- */
+/* Draw a tapered wall: base is `taper` fraction wider than the top.       */
+static void draw_wall_tapered(float cx, float cy, float cz,
+                               float ww, float wh, float wd,
+                               float taper, Color col)
+{
+    float htw = ww * 0.5f;            /* half-top-width  */
+    float htd = wd * 0.5f;            /* half-top-depth  */
+    float hbw = htw * (1.0f + taper); /* half-bottom-width */
+    float hbd = htd * (1.0f + taper); /* half-bottom-depth */
+    float yt  = cy + wh * 0.5f;       /* top Y */
+    float yb  = cy - wh * 0.5f;       /* bottom Y */
+
+    rlCheckRenderBatchLimit(36);
+    rlSetTexture(rlGetTextureIdDefault());
+    rlBegin(RL_QUADS);
+        rlColor4ub(col.r, col.g, col.b, col.a);
+
+        /* Front face (+Z) */
+        float nzf = wh, nyf = (hbd - htd);
+        float lenf = sqrtf(nzf*nzf + nyf*nyf);
+        if (lenf > 0) { nzf /= lenf; nyf /= lenf; }
+        rlNormal3f(0, nyf, nzf);
+        rlVertex3f(cx - hbw, yb, cz + hbd);
+        rlVertex3f(cx + hbw, yb, cz + hbd);
+        rlVertex3f(cx + htw, yt, cz + htd);
+        rlVertex3f(cx - htw, yt, cz + htd);
+
+        /* Back face (-Z) */
+        rlNormal3f(0, nyf, -nzf);
+        rlVertex3f(cx + hbw, yb, cz - hbd);
+        rlVertex3f(cx - hbw, yb, cz - hbd);
+        rlVertex3f(cx - htw, yt, cz - htd);
+        rlVertex3f(cx + htw, yt, cz - htd);
+
+        /* Right face (+X) */
+        float nxr = wh, nyr = (hbw - htw);
+        float lenr = sqrtf(nxr*nxr + nyr*nyr);
+        if (lenr > 0) { nxr /= lenr; nyr /= lenr; }
+        rlNormal3f(nxr, nyr, 0);
+        rlVertex3f(cx + hbw, yb, cz + hbd);
+        rlVertex3f(cx + hbw, yb, cz - hbd);
+        rlVertex3f(cx + htw, yt, cz - htd);
+        rlVertex3f(cx + htw, yt, cz + htd);
+
+        /* Left face (-X) */
+        rlNormal3f(-nxr, nyr, 0);
+        rlVertex3f(cx - hbw, yb, cz - hbd);
+        rlVertex3f(cx - hbw, yb, cz + hbd);
+        rlVertex3f(cx - htw, yt, cz + htd);
+        rlVertex3f(cx - htw, yt, cz - htd);
+
+        /* Top face */
+        rlNormal3f(0, 1, 0);
+        rlVertex3f(cx - htw, yt, cz - htd);
+        rlVertex3f(cx - htw, yt, cz + htd);
+        rlVertex3f(cx + htw, yt, cz + htd);
+        rlVertex3f(cx + htw, yt, cz - htd);
+
+        /* Bottom face */
+        rlNormal3f(0, -1, 0);
+        rlVertex3f(cx - hbw, yb, cz + hbd);
+        rlVertex3f(cx - hbw, yb, cz - hbd);
+        rlVertex3f(cx + hbw, yb, cz - hbd);
+        rlVertex3f(cx + hbw, yb, cz + hbd);
+
+    rlEnd();
+    rlSetTexture(0);
+}
+
+/* Wire-frame outline for a tapered wall. */
+static void draw_wall_tapered_wires(float cx, float cy, float cz,
+                                     float ww, float wh, float wd,
+                                     float taper, Color col)
+{
+    float htw = ww * 0.5f;
+    float htd = wd * 0.5f;
+    float hbw = htw * (1.0f + taper);
+    float hbd = htd * (1.0f + taper);
+    float yt  = cy + wh * 0.5f;
+    float yb  = cy - wh * 0.5f;
+
+    /* 8 corners: t=top, b=bottom; order: front-left, front-right, back-right, back-left */
+    Vector3 tf = {cx - htw, yt, cz + htd};
+    Vector3 tr = {cx + htw, yt, cz + htd};
+    Vector3 tbr= {cx + htw, yt, cz - htd};
+    Vector3 tbl= {cx - htw, yt, cz - htd};
+    Vector3 bf = {cx - hbw, yb, cz + hbd};
+    Vector3 brr= {cx + hbw, yb, cz + hbd};
+    Vector3 bbr= {cx + hbw, yb, cz - hbd};
+    Vector3 bbl= {cx - hbw, yb, cz - hbd};
+
+    /* Top ring */
+    DrawLine3D(tf,  tr,  col);
+    DrawLine3D(tr,  tbr, col);
+    DrawLine3D(tbr, tbl, col);
+    DrawLine3D(tbl, tf,  col);
+    /* Bottom ring */
+    DrawLine3D(bf,  brr, col);
+    DrawLine3D(brr, bbr, col);
+    DrawLine3D(bbr, bbl, col);
+    DrawLine3D(bbl, bf,  col);
+    /* Vertical edges */
+    DrawLine3D(tf,  bf,  col);
+    DrawLine3D(tr,  brr, col);
+    DrawLine3D(tbr, bbr, col);
+    DrawLine3D(tbl, bbl, col);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -885,7 +994,7 @@ int main(void) {
                             Color fill = (wi >= border_start)
                                          ? g_colors.border_fill
                                          : g_colors.wall_fill;
-                            DrawCube((Vector3){wcx, wcy, wcz}, ww, wh, wd, fill);
+                            draw_wall_tapered(wcx, wcy, wcz, ww, wh, wd, 0.2f, fill);
                         }
                     }
 
@@ -918,7 +1027,7 @@ int main(void) {
                             Color wire = (wi >= border_start)
                                          ? g_colors.border_wire
                                          : g_colors.wall_wire;
-                            DrawCubeWires((Vector3){wcx, wcy, wcz}, ww, wh, wd, wire);
+                            draw_wall_tapered_wires(wcx, wcy, wcz, ww, wh, wd, 0.2f, wire);
                         }
                     }
 
