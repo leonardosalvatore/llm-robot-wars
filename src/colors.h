@@ -25,6 +25,9 @@ typedef struct {
 
     Color laser;
 
+    Color scan_wall;
+    Color scan_enemy;
+
     Color explosion[5];
     Color explosion_ring;
     Color explosion_flash;

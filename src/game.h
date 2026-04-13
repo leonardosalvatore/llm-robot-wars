@@ -34,6 +34,7 @@ typedef struct {
     int   move_requested;
     float scan_hit_x[MAX_SCAN_HITS];
     float scan_hit_z[MAX_SCAN_HITS];
+    int   scan_hit_type[MAX_SCAN_HITS]; /* 0 = bot, 1 = wall */
     int   scan_hit_count;
 } BotInertia;
 

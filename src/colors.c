@@ -30,6 +30,8 @@ static const ColorEntry entries[] = {
     CE(armour_fill,     "armour bar fill"),
     CE(armour_bg,       "armour bar background"),
     CE(laser,           "laser projectile"),
+    CE(scan_wall,       "scan line to wall"),
+    CE(scan_enemy,      "scan line to enemy"),
     CE(explosion_ring,  "explosion shockwave"),
     CE(explosion_flash, "explosion flash"),
     CE(bg_clear,        "main game clear"),
@@ -87,6 +89,9 @@ void colors_set_defaults(GameColors *c) {
     c->armour_bg    = (Color){ 20, 20, 20,200};
 
     c->laser        = (Color){230, 41, 55,255};
+
+    c->scan_wall    = (Color){ 60, 60, 60, 40};
+    c->scan_enemy   = (Color){ 50,220, 50, 55};
 
     c->explosion[0] = (Color){255, 70, 10,255};
     c->explosion[1] = (Color){255,140, 30,255};
@@ -194,6 +199,10 @@ void colors_save(const GameColors *c, const char *path) {
 
     fprintf(f, "\n# Projectiles\n");
     write_color(f, "laser",       c->laser,       "laser beam");
+
+    fprintf(f, "\n# Scan lines\n");
+    write_color(f, "scan_wall",   c->scan_wall,   "scan line to wall");
+    write_color(f, "scan_enemy",  c->scan_enemy,  "scan line to enemy");
 
     fprintf(f, "\n# Explosions\n");
     for (int i = 0; i < 5; i++) {

@@ -180,6 +180,7 @@ static int lua_api_scan(lua_State *L) {
         if (h < MAX_SCAN_HITS) {
             self->inertia.scan_hit_x[h] = b->x;
             self->inertia.scan_hit_z[h] = b->z;
+            self->inertia.scan_hit_type[h] = 0;
             self->inertia.scan_hit_count++;
         }
 
@@ -211,6 +212,7 @@ static int lua_api_scan(lua_State *L) {
         if (h < MAX_SCAN_HITS) {
             self->inertia.scan_hit_x[h] = clamp_x;
             self->inertia.scan_hit_z[h] = clamp_z;
+            self->inertia.scan_hit_type[h] = 1;
             self->inertia.scan_hit_count++;
         }
 

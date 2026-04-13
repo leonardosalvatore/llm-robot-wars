@@ -1057,14 +1057,17 @@ int main(void) {
 
                         /* Scan lines (toggle with T) */
                         if (show_scan_lines) {
-                            Color scan_col = {b->r / 6, b->g / 6, b->b / 6, 40};
                             float sy = 0.08f;
-                            for (int h = 0; h < b->inertia.scan_hit_count; h++)
+                            for (int h = 0; h < b->inertia.scan_hit_count; h++) {
+                                Color sc = b->inertia.scan_hit_type[h] == 0
+                                           ? g_colors.scan_enemy
+                                           : g_colors.scan_wall;
                                 DrawLine3D(
                                     (Vector3){b->x, sy, b->z},
                                     (Vector3){b->inertia.scan_hit_x[h], sy,
                                               b->inertia.scan_hit_z[h]},
-                                    scan_col);
+                                    sc);
+                            }
                         }
 
                         /* Energy bar */
