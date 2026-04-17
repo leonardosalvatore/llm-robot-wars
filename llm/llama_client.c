@@ -111,6 +111,18 @@ static bool json_get_string(const char *json, const char *key,
     return json_unescape(&p, val_buf, buf_size);
 }
 
+static bool json_get_int(const char *json, const char *key, int *out) {
+    char needle[128];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(json, needle);
+    if (!p) return false;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if ((*p < '0' || *p > '9') && *p != '-') return false;
+    *out = atoi(p);
+    return true;
+}
+
 static void json_escape_str(const char *src, char *dst, int dst_size) {
     int di = 0;
     while (*src && di < dst_size - 3) {
@@ -158,27 +170,50 @@ bool llama_server_healthy(const char *host, int port) {
 }
 
 int llama_generate(const char *host, int port,
-                   const char *prompt,
-                   char *response_buf, int buf_size) {
-    int prompt_len = (int)strlen(prompt);
-    printf("[llama] Sending prompt (%d chars) via /v1/chat/completions ...\n",
-           prompt_len);
+                   const char *system_prompt,
+                   const char *user_prompt,
+                   char *response_buf, int buf_size,
+                   LlamaGenMeta *meta_out) {
+    if (meta_out) {
+        meta_out->model[0] = '\0';
+        meta_out->prompt_tokens = -1;
+        meta_out->completion_tokens = -1;
+        meta_out->total_tokens = -1;
+    }
+    int system_len = (int)strlen(system_prompt);
+    int user_len   = (int)strlen(user_prompt);
+    printf("[llama] Sending prompts (system=%d, user=%d chars) via /v1/chat/completions ...\n",
+           system_len, user_len);
     fflush(stdout);
 
-    char *esc_prompt = (char *)malloc((size_t)prompt_len * 2 + 16);
-    if (!esc_prompt) return -1;
-    json_escape_str(prompt, esc_prompt, prompt_len * 2 + 16);
+    char *esc_system = (char *)malloc((size_t)system_len * 2 + 16);
+    char *esc_user   = (char *)malloc((size_t)user_len * 2 + 16);
+    if (!esc_system || !esc_user) {
+        free(esc_system);
+        free(esc_user);
+        return -1;
+    }
+    json_escape_str(system_prompt, esc_system, system_len * 2 + 16);
+    json_escape_str(user_prompt,   esc_user,   user_len * 2 + 16);
 
     /*  Use the OpenAI-compatible chat endpoint so reasoning models apply
      *  their chat template and thinking capabilities properly. */
-    int body_cap = (int)strlen(esc_prompt) + 512;
+    int body_cap = (int)strlen(esc_system) + (int)strlen(esc_user) + 640;
     char *json_body = (char *)malloc((size_t)body_cap);
-    if (!json_body) { free(esc_prompt); return -1; }
+    if (!json_body) {
+        free(esc_system);
+        free(esc_user);
+        return -1;
+    }
     int body_len = snprintf(json_body, (size_t)body_cap,
-        "{\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],"
+        "{\"messages\":["
+        "{\"role\":\"system\",\"content\":\"%s\"},"
+        "{\"role\":\"user\",\"content\":\"%s\"}"
+        "],"
         "\"max_tokens\":8192,\"stream\":false}",
-        esc_prompt);
-    free(esc_prompt);
+        esc_system, esc_user);
+    free(esc_system);
+    free(esc_user);
 
     printf("[llama] Connecting to %s:%d ...\n", host, port);
     fflush(stdout);
@@ -232,6 +267,16 @@ int llama_generate(const char *host, int port,
     }
 
     if (ok) {
+        if (meta_out) {
+            json_get_string(body, "model", meta_out->model, (int)sizeof(meta_out->model));
+
+            const char *usage = strstr(body, "\"usage\"");
+            if (usage) {
+                json_get_int(usage, "prompt_tokens", &meta_out->prompt_tokens);
+                json_get_int(usage, "completion_tokens", &meta_out->completion_tokens);
+                json_get_int(usage, "total_tokens", &meta_out->total_tokens);
+            }
+        }
         printf("[llama] Response extracted (%d chars)\n",
                (int)strlen(response_buf));
     } else {

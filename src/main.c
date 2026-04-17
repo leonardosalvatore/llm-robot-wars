@@ -31,6 +31,8 @@ Proj g_projs[MAX_PROJECTILES];
 int  g_proj_count = 0;
 
 #define CAM_SPEED     8.0f
+#define DRAG_PAN_SPEED 0.0006f
+#define ORBIT_SPEED   0.0100f
 #define ZOOM_SPEED   15.0f
 #define ZOOM_MIN      4.0f
 #define ZOOM_MAX     60.0f
@@ -72,11 +74,13 @@ typedef struct {
     bool  auto_respawn;
     int   num_matches;
     int   match_duration;
+    float bot_increment_per_match;
     char  llm_host[80];
     int   llm_port;
+    char  llm_user_prompt[512];
 } GameConfig;
 
-static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 5, 2, 2, 2, 2, 2, 10 };
+static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 2, 1, 1, 1, 1, 1, 5 };
 static const float DEFAULT_MAP_WIDTH            = 50.0f;
 static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
@@ -89,6 +93,44 @@ static float randf(float lo, float hi) {
 
 #define CFG_PATH "llama-wars.cfg"
 
+static void cfg_escape_string(const char *src, char *dst, int dst_size) {
+    int di = 0;
+    while (*src && di < dst_size - 1) {
+        char c = *src++;
+        if (di >= dst_size - 2) break;
+        switch (c) {
+            case '\\': dst[di++] = '\\'; dst[di++] = '\\'; break;
+            case '\n': dst[di++] = '\\'; dst[di++] = 'n';  break;
+            case '\r': dst[di++] = '\\'; dst[di++] = 'r';  break;
+            case '\t': dst[di++] = '\\'; dst[di++] = 't';  break;
+            default:   dst[di++] = c; break;
+        }
+    }
+    dst[di] = '\0';
+}
+
+static void cfg_unescape_string(const char *src, char *dst, int dst_size) {
+    int di = 0;
+    while (*src && di < dst_size - 1) {
+        char c = *src++;
+        if (c == '\\' && *src) {
+            char n = *src++;
+            switch (n) {
+                case 'n': dst[di++] = '\n'; break;
+                case 'r': dst[di++] = '\r'; break;
+                case 't': dst[di++] = '\t'; break;
+                case '\\': dst[di++] = '\\'; break;
+                default:
+                    dst[di++] = n;
+                    break;
+            }
+        } else {
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
+}
+
 static void config_set_defaults(GameConfig *cfg) {
     cfg->map_width        = DEFAULT_MAP_WIDTH;
     cfg->map_height       = DEFAULT_MAP_HEIGHT;
@@ -99,8 +141,10 @@ static void config_set_defaults(GameConfig *cfg) {
     cfg->auto_respawn     = false;
     cfg->num_matches      = DEFAULT_NUM_MATCHES;
     cfg->match_duration   = DEFAULT_MATCH_DURATION;
+    cfg->bot_increment_per_match = 0.0f;
     strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
     cfg->llm_port = LLAMA_DEFAULT_PORT;
+    cfg->llm_user_prompt[0] = '\0';
     for (int s = 0; s < TOTAL_SCRIPTS; s++)
         cfg->bots_per_type[s] = DEFAULT_BOTS[s];
 }
@@ -109,14 +153,16 @@ static bool config_load(GameConfig *cfg, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return false;
 
-    char line[256];
+    char line[2048];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
         char key[64] = {0};
-        char val[128] = {0};
-        if (sscanf(line, " %63[a-z_] = %127[^\n]", key, val) != 2) continue;
-        char *comment = strchr(val, '#');
-        if (comment) *comment = '\0';
+        char val[1536] = {0};
+        if (sscanf(line, " %63[a-z_] = %1535[^\n]", key, val) != 2) continue;
+        if (strcmp(key, "llm_user_prompt") != 0) {
+            char *comment = strchr(val, '#');
+            if (comment) *comment = '\0';
+        }
         while (strlen(val) > 0 && val[strlen(val)-1] == ' ') val[strlen(val)-1] = '\0';
 
         if      (strcmp(key, "map_width")       == 0) cfg->map_width  = (float)atoi(val);
@@ -127,6 +173,7 @@ static bool config_load(GameConfig *cfg, const char *path) {
         else if (strcmp(key, "game_mode")       == 0) cfg->auto_respawn = (strstr(val, "respawn") != NULL);
         else if (strcmp(key, "num_matches")     == 0) cfg->num_matches = atoi(val);
         else if (strcmp(key, "match_duration")  == 0) cfg->match_duration = atoi(val);
+        else if (strcmp(key, "bot_increment_per_match") == 0) cfg->bot_increment_per_match = (float)atof(val);
         else if (strcmp(key, "bot_light")       == 0) cfg->bots_per_type[0] = atoi(val);
         else if (strcmp(key, "bot_skirmisher")  == 0) cfg->bots_per_type[1] = atoi(val);
         else if (strcmp(key, "bot_chaser")      == 0) cfg->bots_per_type[2] = atoi(val);
@@ -139,6 +186,11 @@ static bool config_load(GameConfig *cfg, const char *path) {
             strncpy(cfg->llm_host, val, sizeof(cfg->llm_host) - 1);
         }
         else if (strcmp(key, "llm_port")        == 0) cfg->llm_port = atoi(val);
+        else if (strcmp(key, "llm_user_prompt") == 0) {
+            char *p = val;
+            while (*p == ' ') p++;
+            cfg_unescape_string(p, cfg->llm_user_prompt, (int)sizeof(cfg->llm_user_prompt));
+        }
     }
     fclose(f);
     return true;
@@ -147,6 +199,8 @@ static bool config_load(GameConfig *cfg, const char *path) {
 static void config_save(const GameConfig *cfg, const char *path) {
     FILE *f = fopen(path, "w");
     if (!f) return;
+    char escaped_prompt[1536];
+    cfg_escape_string(cfg->llm_user_prompt, escaped_prompt, (int)sizeof(escaped_prompt));
 
     fprintf(f, "map_width        = %-4d # 10-200\n",  (int)cfg->map_width);
     fprintf(f, "map_height       = %-4d # 10-200\n",  (int)cfg->map_height);
@@ -157,7 +211,9 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "game_mode        = %-8s # match | respawn\n",
             cfg->auto_respawn ? "respawn" : "match");
     fprintf(f, "num_matches      = %-4d # 1-100\n",   cfg->num_matches);
-    fprintf(f, "match_duration   = %-4d # 30-600\n",  cfg->match_duration);
+    fprintf(f, "match_duration   = %-4d # 1-600\n",   cfg->match_duration);
+    fprintf(f, "bot_increment_per_match = %.2f # percent per match, 1=+1%%, 100=+100%%\n",
+            (double)cfg->bot_increment_per_match);
     fprintf(f, "\n");
     fprintf(f, "bot_light        = %-4d # 0-60\n", cfg->bots_per_type[0]);
     fprintf(f, "bot_skirmisher   = %-4d # 0-60\n", cfg->bots_per_type[1]);
@@ -169,12 +225,114 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "\n");
     fprintf(f, "llm_host         = %s\n", cfg->llm_host);
     fprintf(f, "llm_port         = %-4d # 1-65535\n", cfg->llm_port);
+    fprintf(f, "llm_user_prompt  = %s\n", escaped_prompt);
 
     fclose(f);
 }
 
 /* ----------------------------------------------------------------------- */
-static void show_config_screen(GameConfig *cfg) {
+static void draw_multiline_prompt_box(Rectangle bounds, char *text, int text_size,
+                                      bool edit_mode, int max_lines,
+                                      bool shift_enter_for_newline) {
+    Font font = GetFontDefault();
+    const float font_size = 20.0f;
+    const float font_spacing = 1.0f;
+    Color border = edit_mode ? SKYBLUE : GRAY;
+    Color bg     = edit_mode ? (Color){30, 36, 48, 255} : (Color){24, 24, 34, 255};
+    DrawRectangleRec(bounds, bg);
+    DrawRectangleLinesEx(bounds, 2.0f, border);
+
+    char visible[512];
+    int vi = 0;
+    int lines = 1;
+    {
+        for (int i = 0; text[i] != '\0' && vi < (int)sizeof(visible) - 1; i++) {
+            visible[vi++] = text[i];
+            if (text[i] == '\n') {
+                lines++;
+                if (lines > max_lines) break;
+            }
+        }
+        visible[vi] = '\0';
+        DrawTextEx(font, visible,
+                   (Vector2){bounds.x + 8.0f, bounds.y + 8.0f},
+                   font_size, font_spacing, RAYWHITE);
+    }
+
+    if (edit_mode && ((int)(GetTime() * 2.0) % 2 == 0)) {
+        char current_line[512];
+        int cli = 0;
+        int caret_line = 0;
+        for (int i = 0; visible[i] != '\0' && cli < (int)sizeof(current_line) - 1; i++) {
+            if (visible[i] == '\n') {
+                caret_line++;
+                cli = 0;
+            } else {
+                current_line[cli++] = visible[i];
+            }
+        }
+        current_line[cli] = '\0';
+
+        Vector2 line_size = MeasureTextEx(font, current_line, font_size, font_spacing);
+        float line_height = font_size + 4.0f;
+        Vector2 caret_pos = {
+            bounds.x + 8.0f + line_size.x + 1.0f,
+            bounds.y + 8.0f + caret_line * line_height
+        };
+        DrawTextEx(font, "|", caret_pos, font_size, font_spacing, SKYBLUE);
+    }
+
+    if (edit_mode) {
+        int len = (int)strlen(text);
+        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0) {
+            text[len - 1] = '\0';
+            len--;
+        }
+        bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        if (IsKeyPressed(KEY_ENTER) &&
+            (!shift_enter_for_newline || shift_down) &&
+            len < text_size - 1) {
+            text[len++] = '\n';
+            text[len] = '\0';
+        }
+
+        int ch = GetCharPressed();
+        while (ch > 0) {
+            if ((ch >= 32 || ch == '\n') && len < text_size - 1) {
+                text[len++] = (char)ch;
+                text[len] = '\0';
+            }
+            ch = GetCharPressed();
+        }
+    }
+}
+
+/* ----------------------------------------------------------------------- */
+static void orbit_camera_around_target(Camera3D *camera, float yaw_delta, float pitch_delta) {
+    Vector3 offset = Vector3Subtract(camera->position, camera->target);
+    float radius = Vector3Length(offset);
+    if (radius < 0.001f) radius = 0.001f;
+
+    float yaw   = atan2f(offset.z, offset.x);
+    float horiz = sqrtf(offset.x * offset.x + offset.z * offset.z);
+    float pitch = atan2f(offset.y, horiz);
+
+    yaw   += yaw_delta;
+    pitch += pitch_delta;
+    if (pitch >  1.45f) pitch =  1.45f;
+    if (pitch < -1.45f) pitch = -1.45f;
+
+    Vector3 next = {
+        radius * cosf(pitch) * cosf(yaw),
+        radius * sinf(pitch),
+        radius * cosf(pitch) * sinf(yaw)
+    };
+    camera->position = Vector3Add(camera->target, next);
+    camera->up = (Vector3){0.0f, 1.0f, 0.0f};
+}
+
+/* ----------------------------------------------------------------------- */
+static bool show_config_screen(GameConfig *cfg) {
     /* Probe llama-server health each time the config screen is shown */
     bool server_available = llama_server_healthy(cfg->llm_host, cfg->llm_port);
     if (server_available && !cfg->use_llm)
@@ -182,31 +340,35 @@ static void show_config_screen(GameConfig *cfg) {
 
     const int SW      = GetRenderWidth();
     const int SH      = GetRenderHeight();
-    const int PW      = 520;
+    const int PW      = 1040;
     const int ROW_H   = 34;
     const int ROWS    = TOTAL_SCRIPTS + 13;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
-    const int LBL_W   = 190;
+    const int LBL_W   = 220;
     const int CTL_X   = PX + LBL_W + 10;
     const int CTL_W   = PW - LBL_W - 30;
     const float FONT_SZ = 20.0f;
 
     bool edit[6 + TOTAL_SCRIPTS];
     for (int i = 0; i < 6 + TOTAL_SCRIPTS; i++) edit[i] = false;
+    bool bot_inc_edit = false;
 
     int map_width_int  = (int)cfg->map_width;
     int map_height_int = (int)cfg->map_height;
+    char bot_inc_buf[32];
+    snprintf(bot_inc_buf, sizeof(bot_inc_buf), "%.2f", (double)cfg->bot_increment_per_match);
 
     GuiSetStyle(DEFAULT, TEXT_SIZE, (int)FONT_SZ);
 
+    bool start_with_custom_prompt = false;
     while (!WindowShouldClose()) {
         BeginDrawing();
         ClearBackground(g_colors.bg_config);
 
         GuiPanel((Rectangle){(float)PX, (float)PY, (float)PW, (float)PH},
-                 "LlamaWars — Configuration");
+                 "Simulation parameters");
 
         int row = 0;
 #define ROW_Y  (PY + 48 + row * ROW_H)
@@ -321,7 +483,7 @@ static void show_config_screen(GameConfig *cfg) {
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Match duration (s)");
         if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->match_duration, 30, 600, edit[5]))
+                       NULL, &cfg->match_duration, 1, 600, edit[5]))
             edit[5] = !edit[5];
         if (!cfg->use_llm) GuiEnable();
         row++;
@@ -329,6 +491,28 @@ static void show_config_screen(GameConfig *cfg) {
         /* Divider */
         GuiLine((Rectangle){(float)(PX + 10), (float)(ROW_Y - 4),
                              (float)(PW - 20), 1}, "Bots per script");
+        row++;
+
+        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
+                             (float)LBL_W, (float)ROW_H},
+                 "Per match factor");
+        Rectangle bot_inc_minus = {(float)CTL_X, (float)ROW_Y, 70.0f, (float)(ROW_H - 4)};
+        Rectangle bot_inc_plus  = {(float)(CTL_X + CTL_W - 70), (float)ROW_Y, 70.0f, (float)(ROW_H - 4)};
+        Rectangle bot_inc_rect  = {(float)(CTL_X + 78), (float)ROW_Y,
+                                   (float)(CTL_W - 156), (float)(ROW_H - 4)};
+        if (GuiButton(bot_inc_minus, "-1%")) {
+            cfg->bot_increment_per_match -= 1.0f;
+            if (cfg->bot_increment_per_match < 0.0f) cfg->bot_increment_per_match = 0.0f;
+            snprintf(bot_inc_buf, sizeof(bot_inc_buf), "%.2f", (double)cfg->bot_increment_per_match);
+        }
+        if (GuiButton(bot_inc_plus, "+1%")) {
+            cfg->bot_increment_per_match += 1.0f;
+            snprintf(bot_inc_buf, sizeof(bot_inc_buf), "%.2f", (double)cfg->bot_increment_per_match);
+        }
+        if (GuiTextBox(bot_inc_rect, bot_inc_buf, (int)sizeof(bot_inc_buf), bot_inc_edit))
+            bot_inc_edit = !bot_inc_edit;
+        cfg->bot_increment_per_match = (float)atof(bot_inc_buf);
+        if (cfg->bot_increment_per_match < 0.0f) cfg->bot_increment_per_match = 0.0f;
         row++;
 
         /* Bot count spinners */
@@ -358,6 +542,8 @@ static void show_config_screen(GameConfig *cfg) {
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
                     edit[i] = false;
             }
+            if (!CheckCollisionPointRec(GetMousePosition(), bot_inc_rect))
+                bot_inc_edit = false;
         }
 
         /* Summary */
@@ -369,18 +555,29 @@ static void show_config_screen(GameConfig *cfg) {
                             total, map_width_int, map_height_int, cfg->num_walls));
         row++;
 
-        /* Start button */
-        if (GuiButton((Rectangle){(float)(PX + PW / 2 - 80), (float)(ROW_Y + 4),
-                                  160.0f, (float)(ROW_H - 4)},
-                      "Start Game")) {
+        /* Start buttons */
+        Rectangle start_btn = {(float)(PX + PW / 2 - 360), (float)(ROW_Y + 4),
+                               260.0f, (float)(ROW_H - 4)};
+        Rectangle prompt_btn = {(float)(PX + PW / 2 + 100), (float)(ROW_Y + 4),
+                                260.0f, (float)(ROW_H - 4)};
+        if (GuiButton(start_btn, "Start")) {
             EndDrawing();
             break;
         }
+        bool prompt_btn_enabled = cfg->use_llm;
+        if (!prompt_btn_enabled) GuiDisable();
+        if (GuiButton(prompt_btn, "Start with custom prompt")) {
+            start_with_custom_prompt = true;
+            EndDrawing();
+            break;
+        }
+        if (!prompt_btn_enabled) GuiEnable();
 
 #undef ROW_Y
 
         EndDrawing();
     }
+    return start_with_custom_prompt;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -613,7 +810,7 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
 
 static void match_setup(MatchState *ms, const GameConfig *gcfg,
                         float arena_half_x, float arena_half_z,
-                        unsigned wall_seed)
+                        unsigned wall_seed, int match_idx)
 {
     g_bot_count  = 0;
     g_proj_count = 0;
@@ -627,7 +824,11 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
 
     ms->llm_load_error[0] = '\0';
     for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-        int n = gcfg->bots_per_type[s];
+        float growth = (s == LLM_SCRIPT_IDX)
+                     ? 1.0f
+                     : 1.0f + (gcfg->bot_increment_per_match * 0.01f) * (float)match_idx;
+        if (growth < 0.0f) growth = 0.0f;
+        int n = (int)lroundf((double)gcfg->bots_per_type[s] * (double)growth);
         ms->spawn_count[s] = n;
         Color col = g_colors.team[s];
 
@@ -817,7 +1018,7 @@ static void draw_llm_panel(const LlmVisState *vis,
 
 /* ----------------------------------------------------------------------- */
 static void show_match_result(const MatchStats *ms, bool llm_busy, bool is_last) {
-    float show_for = is_last ? 1.0f : 3.0f;
+    float show_for = 1.0f;
     float elapsed  = 0.0f;
     while (elapsed < show_for && !WindowShouldClose()) {
         elapsed += GetFrameTime();
@@ -883,7 +1084,7 @@ int main(void) {
     /* ================================================================== */
     while (!WindowShouldClose()) {
 
-    show_config_screen(&gcfg);
+    bool start_with_custom_prompt = show_config_screen(&gcfg);
     if (WindowShouldClose()) break;
     config_save(&gcfg, CFG_PATH);
 
@@ -894,22 +1095,22 @@ int main(void) {
         .position   = {40.0f, 40.0f, 40.0f},
         .target     = { 0.0f,  0.0f,  0.0f},
         .up         = { 0.0f,  1.0f,  0.0f},
-        .fovy       = 45.0f,
-        .projection = CAMERA_ORTHOGRAPHIC
-    };
-    Camera3D cam_third = {
-        .position   = {arena_half_x * 1.2f, arena_half_z * 0.9f, 0.0f},
-        .target     = {0.0f, 0.0f, 0.0f},
-        .up         = {0.0f, 1.0f, 0.0f},
-        .fovy       = 60.0f,
+        .fovy       = 50.0f,
         .projection = CAMERA_PERSPECTIVE
     };
-    int cam_mode = 0;
     Camera3D *camera = &cam_ortho;
+    bool llm_prompt_modal = gcfg.use_llm && start_with_custom_prompt;
+    bool llm_initial_prompt_pending = gcfg.use_llm && start_with_custom_prompt;
+    char llm_prompt_buffer[sizeof(gcfg.llm_user_prompt)];
+    strncpy(llm_prompt_buffer, gcfg.llm_user_prompt, sizeof(llm_prompt_buffer) - 1);
+    llm_prompt_buffer[sizeof(llm_prompt_buffer) - 1] = '\0';
 
     if (gcfg.use_llm) {
         llm_bot_init(gcfg.llm_host, gcfg.llm_port,
-                     script_paths[LLM_SCRIPT_IDX]);
+                     script_paths[LLM_SCRIPT_IDX],
+                     gcfg.llm_user_prompt);
+        if (!start_with_custom_prompt)
+            llm_bot_request_initial(gcfg.num_matches);
     }
 
     int  match_idx  = 0;
@@ -922,7 +1123,7 @@ int main(void) {
 
         MatchState ms;
         unsigned wall_seed = (unsigned)time(NULL) + (unsigned)(match_idx * 31337);
-        match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed);
+        match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed, match_idx);
         update_reset_llm_stats();
         update_clear_runtime_error();
 
@@ -940,45 +1141,89 @@ int main(void) {
         /* -------------------------------------------------------------- */
         while (!WindowShouldClose() && !match_over) {
             float dt = GetFrameTime();
-            match_time += dt;
-
-            /* Camera mode toggle */
-            if (IsKeyPressed(KEY_C)) {
-                cam_mode = 1 - cam_mode;
-                camera = cam_mode ? &cam_third : &cam_ortho;
+            if (!llm_prompt_modal) {
+                match_time += dt;
             }
 
-            /* Camera controls */
-            Vector3 delta = {0};
-            if (IsKeyDown(KEY_D)) delta = Vector3Add(delta, Vector3Scale(pan_right,    CAM_SPEED * dt));
-            if (IsKeyDown(KEY_A)) delta = Vector3Add(delta, Vector3Scale(pan_right,   -CAM_SPEED * dt));
-            if (IsKeyDown(KEY_W)) delta = Vector3Add(delta, Vector3Scale(pan_forward, -CAM_SPEED * dt));
-            if (IsKeyDown(KEY_S)) delta = Vector3Add(delta, Vector3Scale(pan_forward,  CAM_SPEED * dt));
-            camera->position = Vector3Add(camera->position, delta);
-            camera->target   = Vector3Add(camera->target,   delta);
+            if (gcfg.use_llm && !llm_prompt_modal && IsKeyPressed(KEY_N)) {
+                strncpy(llm_prompt_buffer, gcfg.llm_user_prompt, sizeof(llm_prompt_buffer) - 1);
+                llm_prompt_buffer[sizeof(llm_prompt_buffer) - 1] = '\0';
+                llm_prompt_modal = true;
+            }
 
-            float wheel = GetMouseWheelMove();
-            camera->fovy -= wheel * 3.0f;
-            if (IsKeyDown(KEY_Q)) camera->fovy -= ZOOM_SPEED * dt;
-            if (IsKeyDown(KEY_E)) camera->fovy += ZOOM_SPEED * dt;
-            if (camera->fovy < ZOOM_MIN) camera->fovy = ZOOM_MIN;
-            if (camera->fovy > ZOOM_MAX) camera->fovy = ZOOM_MAX;
+            if (llm_prompt_modal) {
+                bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+                bool apply_prompt = IsKeyPressed(KEY_ENTER) && !shift_down;
+                if (apply_prompt) {
+                    strncpy(gcfg.llm_user_prompt, llm_prompt_buffer, sizeof(gcfg.llm_user_prompt) - 1);
+                    gcfg.llm_user_prompt[sizeof(gcfg.llm_user_prompt) - 1] = '\0';
+                    config_save(&gcfg, CFG_PATH);
+                    llm_bot_set_user_prompt(gcfg.llm_user_prompt);
+                    if (llm_initial_prompt_pending) {
+                        llm_bot_request_initial(gcfg.num_matches);
+                        llm_initial_prompt_pending = false;
+                    } else {
+                        llm_bot_request_prompt_refresh(gcfg.num_matches);
+                    }
+                    llm_prompt_modal = false;
+                }
+                if (IsKeyPressed(KEY_ESCAPE)) {
+                    if (llm_initial_prompt_pending) {
+                        llm_bot_request_initial(gcfg.num_matches);
+                        llm_initial_prompt_pending = false;
+                    }
+                    llm_prompt_modal = false;
+                }
+            } else {
+                /* Camera controls */
+                Vector3 delta = {0};
+                if (IsKeyDown(KEY_D)) delta = Vector3Add(delta, Vector3Scale(pan_right,    CAM_SPEED * dt));
+                if (IsKeyDown(KEY_A)) delta = Vector3Add(delta, Vector3Scale(pan_right,   -CAM_SPEED * dt));
+                if (IsKeyDown(KEY_W)) delta = Vector3Add(delta, Vector3Scale(pan_forward, -CAM_SPEED * dt));
+                if (IsKeyDown(KEY_S)) delta = Vector3Add(delta, Vector3Scale(pan_forward,  CAM_SPEED * dt));
+                if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    Vector2 md = GetMouseDelta();
+                    Vector3 view_dir = Vector3Subtract(camera->target, camera->position);
+                    view_dir.y = 0.0f;
+                    if (Vector3Length(view_dir) > 0.001f) {
+                        view_dir = Vector3Normalize(view_dir);
+                        Vector3 drag_right = Vector3Normalize(Vector3CrossProduct(view_dir, (Vector3){0.0f, 1.0f, 0.0f}));
+                        float drag_scale = Vector3Distance(camera->position, camera->target) * 0.0025f;
+                        delta = Vector3Add(delta, Vector3Scale(drag_right, -md.x * drag_scale));
+                        delta = Vector3Add(delta, Vector3Scale(view_dir,   -md.y * drag_scale));
+                    }
+                }
+                camera->position = Vector3Add(camera->position, delta);
+                camera->target   = Vector3Add(camera->target,   delta);
 
-            if (IsKeyDown(KEY_Z)) { camera->position.y += CAM_SPEED * dt; camera->target.y += CAM_SPEED * dt; }
-            if (IsKeyDown(KEY_X)) { camera->position.y -= CAM_SPEED * dt; camera->target.y -= CAM_SPEED * dt; }
+                if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+                    Vector2 md = GetMouseDelta();
+                    orbit_camera_around_target(camera, -md.x * ORBIT_SPEED, -md.y * ORBIT_SPEED);
+                }
 
-            if (IsKeyPressed(KEY_F))      ToggleFullscreen();
-            if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
-            if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
-            if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
+                float wheel = GetMouseWheelMove();
+                camera->fovy -= wheel * 3.0f;
+                if (IsKeyDown(KEY_Q)) camera->fovy -= ZOOM_SPEED * dt;
+                if (IsKeyDown(KEY_E)) camera->fovy += ZOOM_SPEED * dt;
+                if (camera->fovy < ZOOM_MIN) camera->fovy = ZOOM_MIN;
+                if (camera->fovy > ZOOM_MAX) camera->fovy = ZOOM_MAX;
 
-            /* Simulation tick */
-            update_scripts(g_bots, g_bot_count, dt);
-            update_inertia(g_bots, g_bot_count, dt);
-            update_movement(g_bots, g_bot_count, dt);
-            update_projectiles(g_projs, &g_proj_count, g_bots, g_bot_count, dt);
-            fx_update(dt);
-            lighting_update(dt);
+                if (IsKeyDown(KEY_Z)) { camera->position.y += CAM_SPEED * dt; camera->target.y += CAM_SPEED * dt; }
+                if (IsKeyDown(KEY_X)) { camera->position.y -= CAM_SPEED * dt; camera->target.y -= CAM_SPEED * dt; }
+
+                if (IsKeyPressed(KEY_F))      ToggleFullscreen();
+                if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
+                if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
+                if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
+
+                /* Simulation tick */
+                update_scripts(g_bots, g_bot_count, dt);
+                update_inertia(g_bots, g_bot_count, dt);
+                update_movement(g_bots, g_bot_count, dt);
+                update_projectiles(g_projs, &g_proj_count, g_bots, g_bot_count, dt);
+                fx_update(dt);
+                lighting_update(dt);
+            }
 
             /* ---- Render ------------------------------------------------- */
             BeginDrawing();
@@ -1139,27 +1384,54 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD pan  Q/E zoom  Z/X height  C camera  T scan  F full  R restart  ESC quit"
+                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  N prompt  T scan  F full  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD pan  Q/E zoom  Z/X height  C camera  T scan  F full  R restart  ESC quit";
+                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  T scan  F full  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
+
+                int hud_top = 34;
+                if (gcfg.use_llm) {
+                    LlmVisState hud_vis;
+                    llm_bot_get_vis_state(&hud_vis);
+                    char prompt_preview[96];
+                    int pi = 0;
+                    const char *src = gcfg.llm_user_prompt[0] ? gcfg.llm_user_prompt : "(no custom prompt)";
+                    for (int i = 0; src[i] != '\0' && pi < (int)sizeof(prompt_preview) - 1; i++) {
+                        char c = src[i];
+                        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                        prompt_preview[pi++] = c;
+                    }
+                    prompt_preview[pi] = '\0';
+                    DrawText(TextFormat("Prompt: %.82s", prompt_preview),
+                             10, 34, 20, LIGHTGRAY);
+
+                    char model_line[192];
+                    snprintf(model_line, sizeof(model_line),
+                             "Model: %s   Tok P/C/T: %d/%d/%d",
+                             hud_vis.model[0] ? hud_vis.model : "?",
+                             hud_vis.prompt_tokens,
+                             hud_vis.completion_tokens,
+                             hud_vis.total_tokens);
+                    DrawText(model_line, 10, 56, 20, GRAY);
+                    hud_top = 78;
+                }
 
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
                     if (ms.spawn_count[s] == 0) continue;
                     DrawText(TextFormat("%-16s %d / %d",
                                         script_labels[s],
                                         alive[s], ms.spawn_count[s]),
-                             10, 34 + s * 22, 20, g_colors.team[s]);
+                             10, hud_top + s * 22, 20, g_colors.team[s]);
                 }
                 if (gcfg.auto_respawn) {
                     DrawText(TextFormat("Rounds  —  LLM: %d   Others: %d",
                                         rounds_llm, rounds_nonllm),
-                             10, 34 + TOTAL_SCRIPTS * 22 + 4, 20, RAYWHITE);
-                    DrawFPS(10, 34 + TOTAL_SCRIPTS * 22 + 30);
+                             10, hud_top + TOTAL_SCRIPTS * 22 + 4, 20, RAYWHITE);
+                    DrawFPS(10, hud_top + TOTAL_SCRIPTS * 22 + 30);
                 } else {
-                    DrawFPS(10, 34 + TOTAL_SCRIPTS * 22 + 4);
+                    DrawFPS(10, hud_top + TOTAL_SCRIPTS * 22 + 4);
                 }
 
                 if (gcfg.use_llm) {
@@ -1169,7 +1441,30 @@ int main(void) {
                                     match_time, (float)gcfg.match_duration);
                 }
 
+                if (llm_prompt_modal) {
+                    int ow = GetRenderWidth();
+                    int oh = GetRenderHeight();
+                    Rectangle panel = {(float)(ow / 2 - 760), (float)(oh / 2 - 160), 1520.0f, 320.0f};
+                    DrawRectangle(0, 0, ow, oh, (Color){0, 0, 0, 150});
+                    DrawRectangleRec(panel, (Color){18, 20, 28, 245});
+                    DrawRectangleLinesEx(panel, 2.0f, SKYBLUE);
+                    DrawText("Edit LLM User Prompt", (int)panel.x + 16, (int)panel.y + 12, 28, RAYWHITE);
+                    if (llm_initial_prompt_pending) {
+                        DrawText("Press Enter to apply and start the first generation. Shift+Enter adds a new line. ESC keeps current prompt and starts anyway.",
+                                 (int)panel.x + 16, (int)panel.y + 46, 20, LIGHTGRAY);
+                    } else {
+                        DrawText("Press Enter to apply and regenerate. Shift+Enter adds a new line. ESC to cancel.",
+                                 (int)panel.x + 16, (int)panel.y + 46, 20, LIGHTGRAY);
+                    }
+                    draw_multiline_prompt_box(
+                        (Rectangle){panel.x + 16, panel.y + 80, panel.width - 32, panel.height - 96},
+                        llm_prompt_buffer, (int)sizeof(llm_prompt_buffer), true, 9, true);
+                }
+
             EndDrawing();
+
+            if (llm_prompt_modal)
+                continue;
 
             /* Check match-end conditions */
             {

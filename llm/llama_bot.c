@@ -11,6 +11,7 @@
 
 #include "lua.h"
 #include "lauxlib.h"
+#include "lualib.h"
 
 #define SCRIPT_BUF_SIZE   (32  * 1024)
 #define RESPONSE_BUF_SIZE (128 * 1024)
@@ -20,6 +21,7 @@
 static char g_host[80]         = {0};
 static int  g_port             = 8080;
 static char g_script_path[256] = {0};
+static char g_user_prompt[1024] = {0};
 
 static pthread_mutex_t g_mutex        = PTHREAD_MUTEX_INITIALIZER;
 static bool            g_thread_busy  = false;
@@ -31,6 +33,10 @@ static int            g_vis_log_count       = 0;
 static int            g_last_prompt_chars   = 0;
 static int            g_last_response_chars = 0;
 static int            g_last_bytes_rx       = 0;
+static char           g_last_model[128]     = "";
+static int            g_last_prompt_tokens  = -1;
+static int            g_last_completion_tokens = -1;
+static int            g_last_total_tokens   = -1;
 static char           g_script_status[72]   = "-";
 static LlmLogColor    g_script_color        = LLOG_DIM;
 static char           g_gen_error[512]      = "";
@@ -88,6 +94,11 @@ void llm_bot_get_vis_state(LlmVisState *out) {
     out->response_chars   = g_last_response_chars;
     out->bytes_rx         = g_last_bytes_rx;
     snprintf(out->server, sizeof(out->server), "%s:%d", g_host, g_port);
+    strncpy(out->model, g_last_model, sizeof(out->model) - 1);
+    out->model[sizeof(out->model) - 1] = '\0';
+    out->prompt_tokens     = g_last_prompt_tokens;
+    out->completion_tokens = g_last_completion_tokens;
+    out->total_tokens      = g_last_total_tokens;
     strncpy(out->script_status, g_script_status, sizeof(out->script_status) - 1);
     out->script_color = g_script_color;
 
@@ -154,98 +165,370 @@ static void extract_lua(const char *response, char *out, int out_size) {
 }
 
 /* ----------------------------------------------------------------------- */
+static int smoke_move(lua_State *L) {
+    (void)L;
+    return 0;
+}
+
+static int smoke_fire(lua_State *L) {
+    (void)L;
+    return 0;
+}
+
+static int smoke_scan(lua_State *L) {
+    (void)luaL_optnumber(L, 1, 18.0);
+
+    lua_newtable(L);
+
+    lua_newtable(L);
+    lua_pushstring(L, "bot"); lua_setfield(L, -2, "type");
+    lua_pushnumber(L, 3.0);   lua_setfield(L, -2, "x");
+    lua_pushnumber(L, 2.0);   lua_setfield(L, -2, "z");
+    lua_pushnumber(L, 3.6);   lua_setfield(L, -2, "distance");
+    lua_pushinteger(L, 1);    lua_setfield(L, -2, "team");
+    lua_rawseti(L, -2, 1);
+
+    lua_newtable(L);
+    lua_pushstring(L, "wall"); lua_setfield(L, -2, "type");
+    lua_pushnumber(L, -1.0);   lua_setfield(L, -2, "x");
+    lua_pushnumber(L,  0.5);   lua_setfield(L, -2, "z");
+    lua_pushnumber(L,  1.2);   lua_setfield(L, -2, "distance");
+    lua_rawseti(L, -2, 2);
+
+    return 1;
+}
+
+static void smoke_set_globals(lua_State *L, double x, double z,
+                              double hp, double max_hp) {
+    lua_pushnumber(L, x);      lua_setglobal(L, "self_x");
+    lua_pushnumber(L, z);      lua_setglobal(L, "self_z");
+    lua_pushnumber(L, x);      lua_setglobal(L, "self_last_x");
+    lua_pushnumber(L, z);      lua_setglobal(L, "self_last_z");
+    lua_pushinteger(L, 6);     lua_setglobal(L, "self_team");
+    lua_pushnumber(L, hp);     lua_setglobal(L, "self_hp");
+    lua_pushnumber(L, max_hp); lua_setglobal(L, "self_max_hp");
+}
+
+static bool smoke_test_script(const char *path, char *err, int err_size) {
+    lua_State *L = luaL_newstate();
+    if (!L) {
+        snprintf(err, (size_t)err_size, "smoke test: failed to create Lua state");
+        return false;
+    }
+
+    luaL_openlibs(L);
+    lua_register(L, "move", smoke_move);
+    lua_register(L, "fire", smoke_fire);
+    lua_register(L, "scan", smoke_scan);
+
+    smoke_set_globals(L, 0.0, 0.0, 180.0, 250.0);
+
+    if (luaL_dofile(L, path) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        snprintf(err, (size_t)err_size, "smoke test load error: %s",
+                 msg ? msg : "(unknown error)");
+        lua_close(L);
+        return false;
+    }
+
+    lua_getglobal(L, "init");
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        snprintf(err, (size_t)err_size, "smoke test: init() missing");
+        lua_close(L);
+        return false;
+    }
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        snprintf(err, (size_t)err_size, "smoke test init() error: %s",
+                 msg ? msg : "(unknown error)");
+        lua_close(L);
+        return false;
+    }
+    if (lua_type(L, -1) != LUA_TTABLE) {
+        snprintf(err, (size_t)err_size, "smoke test: init() must return a table");
+        lua_close(L);
+        return false;
+    }
+    lua_pop(L, 1);
+
+    smoke_set_globals(L, 0.0, 0.0, 180.0, 250.0);
+    lua_getglobal(L, "think");
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        snprintf(err, (size_t)err_size, "smoke test: think() missing");
+        lua_close(L);
+        return false;
+    }
+    lua_pushnumber(L, 0.016);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        snprintf(err, (size_t)err_size, "smoke test think() error: %s",
+                 msg ? msg : "(unknown error)");
+        lua_close(L);
+        return false;
+    }
+
+    smoke_set_globals(L, 0.2, -0.1, 40.0, 250.0);
+    lua_getglobal(L, "think");
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        snprintf(err, (size_t)err_size, "smoke test: think() missing on second pass");
+        lua_close(L);
+        return false;
+    }
+    lua_pushnumber(L, 0.033);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        snprintf(err, (size_t)err_size, "smoke test think() error: %s",
+                 msg ? msg : "(unknown error)");
+        lua_close(L);
+        return false;
+    }
+
+    lua_close(L);
+    err[0] = '\0';
+    return true;
+}
+
+/* ----------------------------------------------------------------------- */
+static void append_text(char *dst, int dst_size, int *len_io, const char *fmt, ...) {
+    int len = *len_io;
+    if (len >= dst_size - 1) return;
+
+    va_list ap;
+    va_start(ap, fmt);
+    int wrote = vsnprintf(dst + len, (size_t)(dst_size - len), fmt, ap);
+    va_end(ap);
+
+    if (wrote < 0) return;
+    len += wrote;
+    if (len > dst_size - 1) len = dst_size - 1;
+    *len_io = len;
+}
+
+/* ----------------------------------------------------------------------- */
+static void build_known_bugs(const char *current, char *known_bugs, int size) {
+    int kb_len = 0;
+    known_bugs[0] = '\0';
+
+    if (strstr(current, "local scan") != NULL) {
+        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
+            "=== CRITICAL BUG: variable shadows scan() API ===\n"
+            "The script uses `local scan = scan(...)` which SHADOWS the global\n"
+            "scan() API function. Every subsequent call to scan() then fails.\n"
+            "Fix: use a different name, e.g. `local targets = scan(radius)`.\n"
+            "NEVER name a local variable the same as an API function.\n"
+            "\n");
+    }
+
+    if (strstr(current, "math.atan2") != NULL) {
+        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
+            "=== CRITICAL BUG: math.atan2 does not exist in Lua 5.3+ ===\n"
+            "Replace every `math.atan2(y, x)` with `math.atan(y, x)`.\n"
+            "In Lua 5.3+, math.atan accepts two arguments and replaces math.atan2.\n"
+            "\n");
+    }
+
+    if (strstr(current, "math.hypot") != NULL) {
+        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
+            "=== CRITICAL BUG: math.hypot does not exist in Lua 5.3+ ===\n"
+            "Replace `math.hypot(x, y)` with `math.sqrt(x*x + y*y)`.\n"
+            "Do not call math.hypot in this environment.\n"
+            "\n");
+    }
+}
+
+static void build_system_prompt(char *dst, int dst_size) {
+    snprintf(dst, (size_t)dst_size,
+        "You are iteratively improving a Lua script for an arena combat robot game.\n"
+        "\n"
+        "=== Game API ===\n"
+        "move(dx, dz)   -- set movement direction (internally normalised)\n"
+        "fire(dx, dz)   -- aim and fire weapons in direction (dx, dz)\n"
+        "scan(radius)   -- returns table of entries:\n"
+        "                  {type=\"bot\",  x, z, distance, team}  -- enemy/ally\n"
+        "                  {type=\"wall\", x, z, distance}        -- wall surface\n"
+        "Per-frame globals: self_x, self_z, self_team, self_hp, self_max_hp\n"
+        "Inertia: heavier armour slows hull turning; heavier weapons slow turret aim.\n"
+        "init() must return: {left_weapon, right_weapon, armour}\n"
+        "  Weapons: \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
+        "  Armour:  0 (fast, 100 HP) ... 3 (slow, 250 HP)\n"
+        "Lua math: use math.atan(y, x) -- math.atan2 does NOT exist in Lua 5.3+\n"
+        "\n"
+        "=== NAMING RULES (CRITICAL) ===\n"
+        "NEVER name a local variable the same as an API function.\n"
+        "BAD:  local scan = scan(r)   -- shadows scan(), breaks all future calls\n"
+        "GOOD: local targets = scan(r)\n"
+        "Same rule applies to move, fire, and any other API name.\n"
+        "\n"
+        "Return ONLY the improved Lua script, no explanation, no markdown fences.\n");
+}
+
 typedef struct {
-    char prompt[PROMPT_BUF_SIZE];
+    char system_prompt[PROMPT_BUF_SIZE];
+    char user_prompt[PROMPT_BUF_SIZE];
     char host[80];
     int  port;
     char script_path[256];
 } ThreadArgs;
 
+static void *generate_thread(void *arg);
+
+static void launch_generation_thread(ThreadArgs *ta, const char *label) {
+    pthread_t      tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    int prompt_len = (int)(strlen(ta->system_prompt) + strlen(ta->user_prompt));
+    pthread_mutex_lock(&g_mutex);
+    g_last_prompt_chars = prompt_len;
+    pthread_mutex_unlock(&g_mutex);
+    llm_bot_log(LLOG_NORM, ">> prompt %d chars  %s", prompt_len, label);
+
+    printf("\n===== SYSTEM PROMPT TO LLM (%s) =====\n%s\n"
+           "===== END SYSTEM PROMPT =====\n\n"
+           "===== USER PROMPT TO LLM (%s) =====\n%s\n"
+           "===== END USER PROMPT =====\n\n",
+           label, ta->system_prompt, label, ta->user_prompt);
+    fflush(stdout);
+
+    if (pthread_create(&tid, &attr, generate_thread, ta) != 0) {
+        llm_bot_log(LLOG_ERR, "!! pthread_create failed");
+        free(ta);
+        pthread_mutex_lock(&g_mutex);
+        g_thread_busy = false;
+        pthread_mutex_unlock(&g_mutex);
+    }
+    pthread_attr_destroy(&attr);
+}
+
 static void *generate_thread(void *arg) {
     ThreadArgs *ta = (ThreadArgs *)arg;
 
     char *response = (char *)malloc(RESPONSE_BUF_SIZE);
-    if (!response) { free(ta); goto done; }
-
-    llm_bot_log(LLOG_BRIGHT, ">> GEN start  %s:%d", ta->host, ta->port);
-
-    int rc = llama_generate(ta->host, ta->port,
-                            ta->prompt,
-                            response, RESPONSE_BUF_SIZE);
-    if (rc != 0 || strlen(response) < 10) {
-        llm_bot_log(LLOG_ERR, "!! GEN failed (rc=%d)", rc);
+    char *lua      = (char *)malloc(SCRIPT_BUF_SIZE);
+    if (!response || !lua) {
         free(response);
-        free(ta);
-        goto done;
-    }
-
-    int resp_len = (int)strlen(response);
-    pthread_mutex_lock(&g_mutex);
-    g_last_response_chars = resp_len;
-    g_last_bytes_rx = resp_len * 8;
-    pthread_mutex_unlock(&g_mutex);
-    llm_bot_log(LLOG_NORM, "<< response %d chars", resp_len);
-
-    char *lua = (char *)malloc(SCRIPT_BUF_SIZE);
-    if (!lua) { free(response); free(ta); goto done; }
-
-    extract_lua(response, lua, SCRIPT_BUF_SIZE);
-    free(response);
-
-    if (!strstr(lua, "function")) {
-        llm_bot_log(LLOG_ERR, "!! no Lua functions found, discarding");
-        pthread_mutex_lock(&g_mutex);
-        strncpy(g_script_status, "NO FUNCTIONS", sizeof(g_script_status) - 1);
-        g_script_color = LLOG_ERR;
-        pthread_mutex_unlock(&g_mutex);
         free(lua);
         free(ta);
         goto done;
     }
 
-    if (write_file(ta->script_path, lua) == 0) {
-        llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(lua));
+    llm_bot_log(LLOG_BRIGHT, ">> GEN start  %s:%d", ta->host, ta->port);
 
-        printf("\n===== GENERATED LUA SCRIPT (%d chars) =====\n%s\n"
-               "===== END GENERATED SCRIPT =====\n\n",
-               (int)strlen(lua), lua);
-        fflush(stdout);
+    char retry_user_prompt[PROMPT_BUF_SIZE];
+    strncpy(retry_user_prompt, ta->user_prompt, sizeof(retry_user_prompt) - 1);
+    retry_user_prompt[sizeof(retry_user_prompt) - 1] = '\0';
 
-        char lua_err[512] = "";
-        bool syntax_ok    = false;
-        lua_State *LS = luaL_newstate();
-        if (LS) {
-            syntax_ok = (luaL_loadfile(LS, ta->script_path) == LUA_OK);
-            if (!syntax_ok) {
-                const char *msg = lua_tostring(LS, -1);
-                if (msg) strncpy(lua_err, msg, sizeof(lua_err) - 1);
+    bool success = false;
+    char validation_err[512] = "";
+
+    for (int attempt = 1; attempt <= 2 && !success; attempt++) {
+        LlamaGenMeta meta;
+        int rc = llama_generate(ta->host, ta->port,
+                                ta->system_prompt,
+                                retry_user_prompt,
+                                response, RESPONSE_BUF_SIZE,
+                                &meta);
+        if (rc != 0 || strlen(response) < 10) {
+            llm_bot_log(LLOG_ERR, "!! GEN failed (rc=%d)", rc);
+            break;
+        }
+
+        int resp_len = (int)strlen(response);
+        pthread_mutex_lock(&g_mutex);
+        g_last_response_chars = resp_len;
+        g_last_bytes_rx = resp_len * 8;
+        strncpy(g_last_model, meta.model, sizeof(g_last_model) - 1);
+        g_last_model[sizeof(g_last_model) - 1] = '\0';
+        g_last_prompt_tokens = meta.prompt_tokens;
+        g_last_completion_tokens = meta.completion_tokens;
+        g_last_total_tokens = meta.total_tokens;
+        pthread_mutex_unlock(&g_mutex);
+        llm_bot_log(LLOG_NORM, "<< response %d chars (try %d/2)", resp_len, attempt);
+
+        extract_lua(response, lua, SCRIPT_BUF_SIZE);
+
+        if (!strstr(lua, "function")) {
+            snprintf(validation_err, sizeof(validation_err),
+                     "generated response did not contain Lua functions");
+        } else if (write_file(ta->script_path, lua) != 0) {
+            snprintf(validation_err, sizeof(validation_err),
+                     "write failed: %s", ta->script_path);
+        } else {
+            llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(lua));
+
+            printf("\n===== GENERATED LUA SCRIPT (%d chars) =====\n%s\n"
+                   "===== END GENERATED SCRIPT =====\n\n",
+                   (int)strlen(lua), lua);
+            fflush(stdout);
+
+            char lua_err[512] = "";
+            bool syntax_ok    = false;
+            lua_State *LS = luaL_newstate();
+            if (LS) {
+                syntax_ok = (luaL_loadfile(LS, ta->script_path) == LUA_OK);
+                if (!syntax_ok) {
+                    const char *msg = lua_tostring(LS, -1);
+                    if (msg) strncpy(lua_err, msg, sizeof(lua_err) - 1);
+                }
+                lua_close(LS);
+            } else {
+                syntax_ok = true;
             }
-            lua_close(LS);
-        } else {
-            syntax_ok = true;
+
+            if (!syntax_ok) {
+                snprintf(validation_err, sizeof(validation_err), "%s", lua_err);
+                const char *colon = strrchr(lua_err, ':');
+                llm_bot_log(LLOG_ERR, "!! lua ERR:%s", colon ? colon + 1 : lua_err);
+            } else if (!smoke_test_script(ta->script_path, validation_err,
+                                          (int)sizeof(validation_err))) {
+                llm_bot_log(LLOG_ERR, "!! smoke test failed");
+                llm_bot_log(LLOG_ERR, "!! %s", validation_err);
+            } else {
+                llm_bot_log(LLOG_OK, ">> lua syntax OK");
+                llm_bot_log(LLOG_OK, ">> smoke test OK");
+                pthread_mutex_lock(&g_mutex);
+                g_script_ready = true;
+                strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
+                g_script_color = LLOG_OK;
+                pthread_mutex_unlock(&g_mutex);
+                success = true;
+                break;
+            }
         }
 
-        if (syntax_ok) {
-            llm_bot_log(LLOG_OK, ">> lua syntax OK");
-            pthread_mutex_lock(&g_mutex);
-            g_script_ready = true;
-            strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
-            g_script_color = LLOG_OK;
-            pthread_mutex_unlock(&g_mutex);
-        } else {
-            const char *colon = strrchr(lua_err, ':');
-            llm_bot_log(LLOG_ERR, "!! lua ERR:%s", colon ? colon + 1 : lua_err);
-            pthread_mutex_lock(&g_mutex);
-            strncpy(g_gen_error, lua_err, sizeof(g_gen_error) - 1);
-            g_gen_error_pending = true;
-            strncpy(g_script_status, "INVALID", sizeof(g_script_status) - 1);
-            g_script_color = LLOG_ERR;
-            pthread_mutex_unlock(&g_mutex);
+        if (attempt < 2) {
+            llm_bot_log(LLOG_WARN, "!! validation failed, retrying now");
+            retry_user_prompt[0] = '\0';
+            int retry_len = 0;
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "%s\n", ta->user_prompt);
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "=== IMMEDIATE VALIDATION FAILURE ===\n");
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "Your previous generated script failed validation.\n");
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "Exact error: %s\n", validation_err);
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "Fix this exact issue immediately and return a full corrected Lua script.\n\n");
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "=== Broken generated script ===\n");
+            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
+                        "%s\n", lua);
         }
-    } else {
-        llm_bot_log(LLOG_ERR, "!! write failed: %s", ta->script_path);
     }
 
+    if (!success) {
+        pthread_mutex_lock(&g_mutex);
+        strncpy(g_gen_error, validation_err[0] ? validation_err : "generation failed",
+                sizeof(g_gen_error) - 1);
+        g_gen_error_pending = true;
+        strncpy(g_script_status, "INVALID", sizeof(g_script_status) - 1);
+        g_script_color = LLOG_ERR;
+        pthread_mutex_unlock(&g_mutex);
+    }
+
+    free(response);
     free(lua);
     free(ta);
 
@@ -258,15 +541,37 @@ done:
 
 /* ----------------------------------------------------------------------- */
 
-void llm_bot_init(const char *host, int port, const char *script_path) {
+void llm_bot_init(const char *host, int port, const char *script_path,
+                  const char *user_prompt) {
     strncpy(g_host,        host,        sizeof(g_host)        - 1);
     g_port = port;
     strncpy(g_script_path, script_path, sizeof(g_script_path) - 1);
+    if (user_prompt) {
+        strncpy(g_user_prompt, user_prompt, sizeof(g_user_prompt) - 1);
+        g_user_prompt[sizeof(g_user_prompt) - 1] = '\0';
+    } else {
+        g_user_prompt[0] = '\0';
+    }
     g_script_ready = false;
     g_thread_busy  = false;
+    g_last_model[0] = '\0';
+    g_last_prompt_tokens = -1;
+    g_last_completion_tokens = -1;
+    g_last_total_tokens = -1;
     strncpy(g_script_status, "-", sizeof(g_script_status) - 1);
     g_script_color = LLOG_DIM;
     llm_bot_log(LLOG_DIM, "   server: %s:%d", host, port);
+}
+
+void llm_bot_set_user_prompt(const char *user_prompt) {
+    pthread_mutex_lock(&g_mutex);
+    if (user_prompt) {
+        strncpy(g_user_prompt, user_prompt, sizeof(g_user_prompt) - 1);
+        g_user_prompt[sizeof(g_user_prompt) - 1] = '\0';
+    } else {
+        g_user_prompt[0] = '\0';
+    }
+    pthread_mutex_unlock(&g_mutex);
 }
 
 void llm_bot_submit_match(const MatchStats *s) {
@@ -332,25 +637,7 @@ void llm_bot_submit_match(const MatchStats *s) {
 
     /* Known bugs detected by static analysis of the current script */
     char known_bugs[2048] = "";
-    int  kb_len = 0;
-
-    if (strstr(current, "local scan") != NULL) {
-        kb_len += snprintf(known_bugs + kb_len, (int)sizeof(known_bugs) - kb_len,
-            "=== CRITICAL BUG: variable shadows scan() API ===\n"
-            "The script uses `local scan = scan(...)` which SHADOWS the global\n"
-            "scan() API function. Every subsequent call to scan() then fails.\n"
-            "Fix: use a different name, e.g. `local targets = scan(radius)`.\n"
-            "NEVER name a local variable the same as an API function.\n"
-            "\n");
-    }
-
-    if (strstr(current, "math.atan2") != NULL) {
-        kb_len += snprintf(known_bugs + kb_len, (int)sizeof(known_bugs) - kb_len,
-            "=== CRITICAL BUG: math.atan2 does not exist in Lua 5.3+ ===\n"
-            "Replace every `math.atan2(y, x)` with `math.atan(y, x)`.\n"
-            "In Lua 5.3+, math.atan accepts two arguments and replaces math.atan2.\n"
-            "\n");
-    }
+    build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
 
     /* Build compact match-history section (last 1-3 matches) */
     char history_section[512] = "";
@@ -371,28 +658,10 @@ void llm_bot_submit_match(const MatchStats *s) {
             h->winner_name);
     }
 
-    snprintf(ta->prompt, sizeof(ta->prompt),
-        "You are iteratively improving a Lua script for an arena combat robot game.\n"
-        "\n"
-        "=== Game API ===\n"
-        "move(dx, dz)   -- set movement direction (internally normalised)\n"
-        "fire(dx, dz)   -- aim and fire weapons in direction (dx, dz)\n"
-        "scan(radius)   -- returns table of entries:\n"
-        "                  {type=\"bot\",  x, z, distance, team}  -- enemy/ally\n"
-        "                  {type=\"wall\", x, z, distance}        -- wall surface\n"
-        "Per-frame globals: self_x, self_z, self_team, self_hp, self_max_hp\n"
-        "Inertia: heavier armour slows hull turning; heavier weapons slow turret aim.\n"
-        "init() must return: {left_weapon, right_weapon, armour}\n"
-        "  Weapons: \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
-        "  Armour:  0 (fast, 100 HP) ... 3 (slow, 250 HP)\n"
-        "Lua math: use math.atan(y, x) -- math.atan2 does NOT exist in Lua 5.3+\n"
-        "\n"
-        "=== NAMING RULES (CRITICAL) ===\n"
-        "NEVER name a local variable the same as an API function.\n"
-        "BAD:  local scan = scan(r)   -- shadows scan(), breaks all future calls\n"
-        "GOOD: local targets = scan(r)\n"
-        "Same rule applies to move, fire, and any other API name.\n"
-        "\n"
+    build_system_prompt(ta->system_prompt, (int)sizeof(ta->system_prompt));
+
+    snprintf(ta->user_prompt, sizeof(ta->user_prompt),
+        "%s%s%s"
         "%s"   /* known_bugs */
         "%s"   /* error_section */
         "=== Current script ===\n"
@@ -400,7 +669,10 @@ void llm_bot_submit_match(const MatchStats *s) {
         "\n"
         "%s"   /* history_section */
         "\n"
-        "Return ONLY the improved Lua script, no explanation, no markdown fences.\n",
+        "Improve the script using the system rules above.\n",
+        g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
+        g_user_prompt[0] != '\0' ? g_user_prompt : "",
+        g_user_prompt[0] != '\0' ? "\n\n" : "",
         known_bugs,
         error_section,
         current,
@@ -409,31 +681,131 @@ void llm_bot_submit_match(const MatchStats *s) {
 
     free(current);
 
-    pthread_t      tid;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    {
+        char label[64];
+        snprintf(label, sizeof(label), "match %d/%d",
+                 s->match_number, s->total_matches);
+        launch_generation_thread(ta, label);
+    }
+}
 
-    int prompt_len = (int)strlen(ta->prompt);
+void llm_bot_request_initial(int total_matches) {
     pthread_mutex_lock(&g_mutex);
-    g_last_prompt_chars = prompt_len;
+    bool busy = g_thread_busy;
+    if (!busy) g_thread_busy = true;
     pthread_mutex_unlock(&g_mutex);
-    llm_bot_log(LLOG_NORM, ">> prompt %d chars  match %d/%d",
-                   prompt_len, s->match_number, s->total_matches);
 
-    printf("\n===== PROMPT TO LLM (match %d/%d, %d chars) =====\n%s\n"
-           "===== END PROMPT =====\n\n",
-           s->match_number, s->total_matches, prompt_len, ta->prompt);
-    fflush(stdout);
+    if (busy) {
+        llm_bot_log(LLOG_WARN, "!! gen busy, skip initial bootstrap");
+        return;
+    }
 
-    if (pthread_create(&tid, &attr, generate_thread, ta) != 0) {
-        llm_bot_log(LLOG_ERR, "!! pthread_create failed");
+    ThreadArgs *ta = (ThreadArgs *)malloc(sizeof(ThreadArgs));
+    if (!ta) {
+        pthread_mutex_lock(&g_mutex);
+        g_thread_busy = false;
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
+
+    strncpy(ta->host,        g_host,        sizeof(ta->host)        - 1);
+    ta->port = g_port;
+    strncpy(ta->script_path, g_script_path, sizeof(ta->script_path) - 1);
+
+    char *current = (char *)malloc(SCRIPT_BUF_SIZE);
+    if (!current) {
         free(ta);
         pthread_mutex_lock(&g_mutex);
         g_thread_busy = false;
         pthread_mutex_unlock(&g_mutex);
+        return;
     }
-    pthread_attr_destroy(&attr);
+    if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
+        snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
+
+    char known_bugs[2048] = "";
+    build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
+    build_system_prompt(ta->system_prompt, (int)sizeof(ta->system_prompt));
+
+    snprintf(ta->user_prompt, sizeof(ta->user_prompt),
+        "%s%s%s"
+        "%s"
+        "=== Current script ===\n"
+        "%s\n"
+        "\n"
+        "=== Startup request ===\n"
+        "Improve this script immediately before the first match starts.\n"
+        "There is no match history yet, so focus on producing a strong, stable,\n"
+        "runtime-safe script that follows the system rules.\n"
+        "Total planned matches: %d\n",
+        g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
+        g_user_prompt[0] != '\0' ? g_user_prompt : "",
+        g_user_prompt[0] != '\0' ? "\n\n" : "",
+        known_bugs,
+        current,
+        total_matches);
+
+    free(current);
+    launch_generation_thread(ta, "startup bootstrap");
+}
+
+void llm_bot_request_prompt_refresh(int total_matches) {
+    pthread_mutex_lock(&g_mutex);
+    bool busy = g_thread_busy;
+    if (!busy) g_thread_busy = true;
+    pthread_mutex_unlock(&g_mutex);
+
+    if (busy) {
+        llm_bot_log(LLOG_WARN, "!! gen busy, skip prompt refresh");
+        return;
+    }
+
+    ThreadArgs *ta = (ThreadArgs *)malloc(sizeof(ThreadArgs));
+    if (!ta) {
+        pthread_mutex_lock(&g_mutex);
+        g_thread_busy = false;
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
+
+    strncpy(ta->host,        g_host,        sizeof(ta->host)        - 1);
+    ta->port = g_port;
+    strncpy(ta->script_path, g_script_path, sizeof(ta->script_path) - 1);
+
+    char *current = (char *)malloc(SCRIPT_BUF_SIZE);
+    if (!current) {
+        free(ta);
+        pthread_mutex_lock(&g_mutex);
+        g_thread_busy = false;
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
+    if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
+        snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
+
+    char known_bugs[2048] = "";
+    build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
+    build_system_prompt(ta->system_prompt, (int)sizeof(ta->system_prompt));
+
+    snprintf(ta->user_prompt, sizeof(ta->user_prompt),
+        "%s%s%s"
+        "%s"
+        "=== Current script ===\n"
+        "%s\n"
+        "\n"
+        "=== Manual prompt refresh ===\n"
+        "The user changed the extra instructions during the current session.\n"
+        "Regenerate the full script immediately using the new user context.\n"
+        "Total planned matches: %d\n",
+        g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
+        g_user_prompt[0] != '\0' ? g_user_prompt : "",
+        g_user_prompt[0] != '\0' ? "\n\n" : "",
+        known_bugs,
+        current,
+        total_matches);
+
+    free(current);
+    launch_generation_thread(ta, "prompt refresh");
 }
 
 bool llm_bot_poll_ready(void) {

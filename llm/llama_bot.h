@@ -22,9 +22,13 @@ typedef struct {
 typedef struct {
     bool          is_busy;
     char          server[128];
+    char          model[128];
     int           prompt_chars;
     int           response_chars;
     int           bytes_rx;
+    int           prompt_tokens;
+    int           completion_tokens;
+    int           total_tokens;
     char          script_status[72];
     LlmLogColor   script_color;
     LlmLogLine    log[LLM_VIS_LOG_LINES];
@@ -45,7 +49,11 @@ typedef struct {
     char  runtime_error[512];
 } MatchStats;
 
-void llm_bot_init(const char *host, int port, const char *script_path);
+void llm_bot_init(const char *host, int port, const char *script_path,
+                  const char *user_prompt);
+void llm_bot_set_user_prompt(const char *user_prompt);
+void llm_bot_request_initial(int total_matches);
+void llm_bot_request_prompt_refresh(int total_matches);
 void llm_bot_submit_match(const MatchStats *stats);
 bool llm_bot_poll_ready(void);
 bool llm_bot_poll_gen_error(char *buf, int size);

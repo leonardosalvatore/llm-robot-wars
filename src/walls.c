@@ -4,6 +4,8 @@
 static Wall  g_walls[MAX_WALLS];
 static int   g_wall_count = 0;
 
+#define WALL_BOT_COLLISION_PAD 0.35f
+
 /* -----------------------------------------------------------------------
  * Minimal LCG for reproducible wall placement, independent of rand().
  * ----------------------------------------------------------------------- */
@@ -170,11 +172,13 @@ bool walls_point_inside(float px, float pz) {
 void walls_push_out_bot(float *px, float *pz, float *vx, float *vz) {
     for (int i = 0; i < g_wall_count; i++) {
         const Wall *w = &g_walls[i];
+        float hw = w->hw + WALL_BOT_COLLISION_PAD;
+        float hd = w->hd + WALL_BOT_COLLISION_PAD;
 
         float ox = *px - w->x;
         float oz = *pz - w->z;
-        float over_x = w->hw - fabsf(ox);
-        float over_z = w->hd - fabsf(oz);
+        float over_x = hw - fabsf(ox);
+        float over_z = hd - fabsf(oz);
 
         if (over_x <= 0.0f || over_z <= 0.0f) continue; /* no overlap */
 
@@ -198,8 +202,9 @@ void walls_push_out_bot(float *px, float *pz, float *vx, float *vz) {
 bool walls_safe_spawn(float px, float pz, float margin) {
     for (int i = 0; i < g_wall_count; i++) {
         const Wall *w = &g_walls[i];
-        if (px >= w->x - w->hw - margin && px <= w->x + w->hw + margin &&
-            pz >= w->z - w->hd - margin && pz <= w->z + w->hd + margin)
+        float expand = margin + WALL_BOT_COLLISION_PAD;
+        if (px >= w->x - w->hw - expand && px <= w->x + w->hw + expand &&
+            pz >= w->z - w->hd - expand && pz <= w->z + w->hd + expand)
             return false;
     }
     return true;
