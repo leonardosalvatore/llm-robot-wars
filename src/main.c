@@ -70,6 +70,7 @@ typedef struct {
     int   num_walls;
     int   wall_size;
     bool  use_llm;
+    bool  reset_llm_bot;
     bool  opposite_corners;
     bool  auto_respawn;
     int   num_matches;
@@ -92,6 +93,32 @@ static float randf(float lo, float hi) {
 }
 
 #define CFG_PATH "llama-wars.cfg"
+#define BOT_LLM_PATH        "scripts/bot_llm.lua"
+#define BOT_LLM_BACKUP_PATH "scripts/bot_llm.lua.backup"
+
+static bool copy_file_overwrite(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return false;
+    FILE *out = fopen(dst, "wb");
+    if (!out) { fclose(in); return false; }
+    char buf[4096];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+    }
+    if (ferror(in)) ok = false;
+    fclose(in);
+    fclose(out);
+    return ok;
+}
+
+static void reset_llm_bot_script(void) {
+    /* Overwrite the working copy used by the engine. Scripts are loaded
+       relative to the CWD, so a relative path matches wherever the binary
+       is launched from (repo root or build/). */
+    copy_file_overwrite(BOT_LLM_BACKUP_PATH, BOT_LLM_PATH);
+}
 
 static void cfg_escape_string(const char *src, char *dst, int dst_size) {
     int di = 0;
@@ -137,6 +164,7 @@ static void config_set_defaults(GameConfig *cfg) {
     cfg->num_walls        = DEFAULT_NUM_WALLS;
     cfg->wall_size        = 1;
     cfg->use_llm          = false;
+    cfg->reset_llm_bot    = true;
     cfg->opposite_corners = true;
     cfg->auto_respawn     = false;
     cfg->num_matches      = DEFAULT_NUM_MATCHES;
@@ -439,10 +467,10 @@ static bool show_config_screen(GameConfig *cfg) {
         {
             bool chk = cfg->use_llm;
             if (!server_available) GuiDisable();
-            if (GuiCheckBox((Rectangle){(float)CTL_X, (float)ROW_Y + 6,
-                                        (float)(ROW_H - 12), (float)(ROW_H - 12)},
-                            "Use LLM AI", &chk))
-                cfg->use_llm = chk;
+            GuiCheckBox((Rectangle){(float)CTL_X, (float)ROW_Y + 6,
+                                    (float)(ROW_H - 12), (float)(ROW_H - 12)},
+                        "Use LlaMa AI", &chk);
+            cfg->use_llm = chk;
             if (!server_available) {
                 GuiEnable();
                 GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
@@ -455,6 +483,15 @@ static bool show_config_screen(GameConfig *cfg) {
                 GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
                                      (float)LBL_W, (float)ROW_H},
                          "LLM Server");
+                /* Reset LlaMa bot checkbox, anchored to the right edge of
+                   the panel so it doesn't overlap the "Use LlaMa AI" label. */
+                bool rst = cfg->reset_llm_bot;
+                GuiCheckBox((Rectangle){(float)(PX + PW - 260),
+                                        (float)ROW_Y + 6,
+                                        (float)(ROW_H - 12),
+                                        (float)(ROW_H - 12)},
+                            "reset LlaMa bot", &rst);
+                cfg->reset_llm_bot = rst;
             }
         }
         row++;
@@ -1088,6 +1125,9 @@ int main(void) {
     if (WindowShouldClose()) break;
     config_save(&gcfg, CFG_PATH);
 
+    if (gcfg.use_llm && gcfg.reset_llm_bot)
+        reset_llm_bot_script();
+
     float arena_half_x = gcfg.map_width  * 0.5f;
     float arena_half_z = gcfg.map_height * 0.5f;
 
@@ -1125,6 +1165,7 @@ int main(void) {
         unsigned wall_seed = (unsigned)time(NULL) + (unsigned)(match_idx * 31337);
         match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed, match_idx);
         update_reset_llm_stats();
+        update_telemetry_reset();
         update_clear_runtime_error();
 
         float match_time    = 0.0f;
@@ -1529,6 +1570,24 @@ int main(void) {
 
             update_get_llm_stats(&mstats.damage_dealt, &mstats.kills);
             update_get_runtime_error(mstats.runtime_error, sizeof(mstats.runtime_error));
+
+            {
+                LlmTelemetry tel;
+                update_telemetry_get(&tel);
+                mstats.think_frames         = tel.think_frames;
+                mstats.enemy_visible_frames = tel.enemy_visible_frames;
+                mstats.fire_frames          = tel.fire_frames;
+                mstats.shots_fired          = tel.shots_fired;
+                mstats.shots_hit            = tel.shots_hit;
+                mstats.arena_bumps          = tel.arena_bumps;
+                mstats.wall_bumps           = tel.wall_bumps;
+                mstats.avg_nearest_dist     = (tel.nearest_dist_samples > 0)
+                    ? tel.nearest_dist_sum / (float)tel.nearest_dist_samples : 0.0f;
+                mstats.visibility_frac      = (tel.think_frames > 0)
+                    ? (float)tel.enemy_visible_frames / (float)tel.think_frames : 0.0f;
+                mstats.hit_rate             = (tel.shots_fired > 0)
+                    ? (float)tel.shots_hit / (float)tel.shots_fired : 0.0f;
+            }
 
             if (ms.llm_load_error[0] != '\0')
                 strncpy(mstats.script_error, ms.llm_load_error,

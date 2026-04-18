@@ -47,6 +47,12 @@ static bool           g_gen_error_pending   = false;
 static MatchStats g_match_history[MATCH_HISTORY_SIZE];
 static int        g_match_history_count = 0;
 
+/* Single-slot queue: if a match ends while a generation is still running, we
+ * stash its stats here and submit it as soon as the generation thread exits.
+ * Keeping only the newest guarantees the LLM always sees the latest match. */
+static bool       g_pending_match_valid = false;
+static MatchStats g_pending_match;
+
 /* ----------------------------------------------------------------------- */
 static int read_file(const char *path, char *buf, int buf_size) {
     FILE *f = fopen(path, "r");
@@ -305,6 +311,87 @@ static void append_text(char *dst, int dst_size, int *len_io, const char *fmt, .
 }
 
 /* ----------------------------------------------------------------------- */
+/* Detect patterns in a GENERATED script that we know break at runtime.
+ * Returns the first issue as a plain-text hint, or empty if clean. */
+static void detect_generated_bugs(const char *script, char *hint, int hint_size) {
+    hint[0] = '\0';
+    if (!script) return;
+
+    if (strstr(script, "math.atan2")) {
+        snprintf(hint, (size_t)hint_size,
+            "Your script uses math.atan2, which does not exist in Lua 5.3+. "
+            "Replace every math.atan2(y, x) with math.atan(y, x).");
+        return;
+    }
+    if (strstr(script, "math.hypot")) {
+        snprintf(hint, (size_t)hint_size,
+            "Your script uses math.hypot, which does not exist. "
+            "Replace with math.sqrt(x*x + y*y).");
+        return;
+    }
+    /* Table-literal subscript: "}[" after a closing brace that is part of a table
+     * literal is almost always the broken `{...}[key]` pattern. */
+    {
+        const char *p = script;
+        while ((p = strstr(p, "}[")) != NULL) {
+            /* Walk backwards to find the matching '{' and confirm it's a literal,
+             * not a function/body. A function body would have ")" or "end" before. */
+            int depth = 1;
+            const char *q = p - 1;
+            while (q > script && depth > 0) {
+                if (*q == '}') depth++;
+                else if (*q == '{') depth--;
+                if (depth == 0) break;
+                q--;
+            }
+            if (depth == 0 && q > script) {
+                /* Scan left of '{' for non-space; if it's '=' or ',' or '(' or 'return'
+                 * we're subscripting a table literal. */
+                const char *r = q - 1;
+                while (r > script && (*r == ' ' || *r == '\t' || *r == '\n')) r--;
+                if (*r == '=' || *r == ',' || *r == '(' ||
+                    (r >= script + 5 && strncmp(r - 5, "return", 6) == 0)) {
+                    snprintf(hint, (size_t)hint_size,
+                        "Your script subscripts a table literal in one expression "
+                        "(pattern '{...}[key]'). Lua parses this as two statements "
+                        "and crashes. Assign the table to a local first: "
+                        "local T = {...}; local v = T[key].");
+                    return;
+                }
+            }
+            p += 2;
+        }
+    }
+    /* init() called at file scope before think definitions run. Typical
+     * telltale: a top-level call "init()" that is NOT inside a function body. */
+    {
+        const char *p = script;
+        while ((p = strstr(p, "init()")) != NULL) {
+            /* Skip the definition line. */
+            if (p >= script + 9 && strncmp(p - 9, "function ", 9) == 0) { p += 6; continue; }
+            /* Check whether this occurrence is inside any function by counting
+             * "function" vs "end" tokens before it. */
+            int fn_count = 0, end_count = 0;
+            for (const char *s = script; s < p; s++) {
+                if (strncmp(s, "function", 8) == 0 &&
+                    (s == script || !(s[-1] >= 'a' && s[-1] <= 'z')) &&
+                    !(s[8] >= 'a' && s[8] <= 'z')) fn_count++;
+                if (strncmp(s, "end", 3) == 0 &&
+                    (s == script || !(s[-1] >= 'a' && s[-1] <= 'z')) &&
+                    !(s[3] >= 'a' && s[3] <= 'z')) end_count++;
+            }
+            if (fn_count <= end_count) {
+                snprintf(hint, (size_t)hint_size,
+                    "Your script calls init() at file scope (outside any function). "
+                    "Do not call init() yourself -- the engine calls it. "
+                    "Move any data you need out of init() into a plain local table.");
+                return;
+            }
+            p += 6;
+        }
+    }
+}
+
 static void build_known_bugs(const char *current, char *known_bugs, int size) {
     int kb_len = 0;
     known_bugs[0] = '\0';
@@ -341,25 +428,64 @@ static void build_system_prompt(char *dst, int dst_size) {
         "You are iteratively improving a Lua script for an arena combat robot game.\n"
         "\n"
         "=== Game API ===\n"
-        "move(dx, dz)   -- set movement direction (internally normalised)\n"
-        "fire(dx, dz)   -- aim and fire weapons in direction (dx, dz)\n"
-        "scan(radius)   -- returns table of entries:\n"
-        "                  {type=\"bot\",  x, z, distance, team}  -- enemy/ally\n"
-        "                  {type=\"wall\", x, z, distance}        -- wall surface\n"
-        "Per-frame globals: self_x, self_z, self_team, self_hp, self_max_hp\n"
-        "Inertia: heavier armour slows hull turning; heavier weapons slow turret aim.\n"
-        "init() must return: {left_weapon, right_weapon, armour}\n"
-        "  Weapons: \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
-        "  Armour:  0 (fast, 100 HP) ... 3 (slow, 250 HP)\n"
-        "Lua math: use math.atan(y, x) -- math.atan2 does NOT exist in Lua 5.3+\n"
+        "move(dx, dz)   -- set movement direction; internally normalised; magnitude ignored.\n"
+        "               -- Do NOT multiply dx/dz by a speed scalar -- pass a unit direction.\n"
+        "fire(dx, dz)   -- aim turret toward (dx,dz) and fire BOTH weapons this frame.\n"
+        "               -- There is no internal cooldown; call from your own timer.\n"
+        "scan(radius)   -- radius argument is ignored; returns all bots (LOS) + walls.\n"
+        "               -- entries: {type=\"bot\",  x, z, distance, team, hp, max_hp}\n"
+        "                           {type=\"wall\", x, z, distance}   (x,z = nearest point)\n"
+        "Per-frame globals:\n"
+        "  self_x, self_z        -- world position (z is the forward axis)\n"
+        "  self_team             -- integer script id of this bot's team\n"
+        "  self_hp, self_max_hp  -- current and maximum hit points\n"
+        "  self_left_weapon, self_right_weapon  -- string, same values as init()\n"
+        "  self_armour           -- integer 0..3\n"
+        "  self_max_speed        -- current max linear speed in units/second\n"
+        "init() must return: {left_weapon=..., right_weapon=..., armour=...}\n"
         "\n"
-        "=== NAMING RULES (CRITICAL) ===\n"
-        "NEVER name a local variable the same as an API function.\n"
-        "BAD:  local scan = scan(r)   -- shadows scan(), breaks all future calls\n"
-        "GOOD: local targets = scan(r)\n"
-        "Same rule applies to move, fire, and any other API name.\n"
+        "=== Weapon stats (per projectile; both weapons fire together on fire()) ===\n"
+        "                 damage  speed(u/s)  lifetime(s)  range  turret_turn(rad/s)  fire_interval(s)\n"
+        "  MachineGun       5      20            1.5         30          8                0.12\n"
+        "  AutoCannon      25      15            3.0         45          4                0.60\n"
+        "  Laser            2      90            0.5         45          2                0.08\n"
+        "Hit radius on target is ~0.6 units. No projectile drop.\n"
+        "fire() is engine-rate-limited per weapon: if its cooldown has not elapsed the\n"
+        "shot is silently dropped. You can safely call fire() every frame; excess calls\n"
+        "cost nothing. But to aim better, still gate fire() on having a target in range.\n"
         "\n"
-        "Return ONLY the improved Lua script, no explanation, no markdown fences.\n");
+        "=== Armour / chassis stats (integer armour 0..3) ===\n"
+        "                 max_hp  max_speed(u/s)  body_turn(rad/s)  body_scale\n"
+        "  armour 0        100     5.0             10                0.7\n"
+        "  armour 1        150     3.5              6                1.0\n"
+        "  armour 2        200     2.0              3.5              1.3\n"
+        "  armour 3        250     0.8              2.0              1.6\n"
+        "Turret turn rate uses the SLOWER of the two weapons' rates.\n"
+        "\n"
+        "=== Arena & physics ===\n"
+        "Arena is a rectangle centred on (0,0) with hard border walls.\n"
+        "Movement is forward only along body heading; turning is rate-limited.\n"
+        "fire() aims the turret toward the given direction but turret also turns rate-limited,\n"
+        "so the actual shot direction is the CURRENT turret angle, not the requested angle.\n"
+        "Projectiles come from the two weapon mounts on either side of the body.\n"
+        "\n"
+        "=== Lua 5.4 quirks you keep getting wrong ===\n"
+        "1. math.atan2 does NOT exist. Use math.atan(y, x).\n"
+        "2. math.hypot does NOT exist. Use math.sqrt(x*x + y*y).\n"
+        "3. You cannot subscript a table literal in one expression:\n"
+        "     BAD:  local d = {a=1, b=2}[key]\n"
+        "     GOOD: local T = {a=1, b=2}; local d = T[key]\n"
+        "4. Do NOT call functions at file scope before they are defined later in the file.\n"
+        "   Globals are resolved at call time but the function must exist by then. Safer:\n"
+        "   declare tables/constants at top and functions after, call functions only from think().\n"
+        "5. Every local variable name must differ from API names (move, fire, scan).\n"
+        "     BAD:  local scan = scan(r)\n"
+        "     GOOD: local targets = scan(0)\n"
+        "6. Lua has no continue keyword. Use `goto continue` with a label, or nest an if.\n"
+        "\n"
+        "=== Output format ===\n"
+        "Return ONLY the Lua script. No markdown fences, no commentary, no reasoning prose.\n"
+        "The script must define init() returning a table, and think(dt).\n");
 }
 
 typedef struct {
@@ -448,9 +574,15 @@ static void *generate_thread(void *arg) {
 
         extract_lua(response, lua, SCRIPT_BUF_SIZE);
 
+    char static_hint[480] = "";
+    detect_generated_bugs(lua, static_hint, (int)sizeof(static_hint));
+
         if (!strstr(lua, "function")) {
             snprintf(validation_err, sizeof(validation_err),
                      "generated response did not contain Lua functions");
+        } else if (static_hint[0] != '\0') {
+            snprintf(validation_err, sizeof(validation_err),
+                     "static check: %s", static_hint);
         } else if (write_file(ta->script_path, lua) != 0) {
             snprintf(validation_err, sizeof(validation_err),
                      "write failed: %s", ta->script_path);
@@ -510,11 +642,10 @@ static void *generate_thread(void *arg) {
             append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
                         "Exact error: %s\n", validation_err);
             append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
-                        "Fix this exact issue immediately and return a full corrected Lua script.\n\n");
-            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
-                        "=== Broken generated script ===\n");
-            append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
-                        "%s\n", lua);
+                        "Do NOT repeat the same construct. Regenerate the FULL script "
+                        "from scratch, applying the Lua quirks rules from the system prompt.\n");
+            /* NOTE: intentionally do NOT include the broken script -- past runs show
+             * the model re-emits the same invalid pattern when it sees it again. */
         }
     }
 
@@ -535,7 +666,18 @@ static void *generate_thread(void *arg) {
 done:
     pthread_mutex_lock(&g_mutex);
     g_thread_busy = false;
+    bool have_pending = g_pending_match_valid;
+    MatchStats pending = {0};
+    if (have_pending) {
+        pending = g_pending_match;
+        g_pending_match_valid = false;
+    }
     pthread_mutex_unlock(&g_mutex);
+
+    if (have_pending) {
+        llm_bot_log(LLOG_NORM, ">> flushing queued match %d", pending.match_number);
+        llm_bot_submit_match(&pending);
+    }
     return NULL;
 }
 
@@ -581,7 +723,11 @@ void llm_bot_submit_match(const MatchStats *s) {
     pthread_mutex_unlock(&g_mutex);
 
     if (busy) {
-        llm_bot_log(LLOG_WARN, "!! gen busy, skip match %d", s->match_number);
+        pthread_mutex_lock(&g_mutex);
+        g_pending_match       = *s;
+        g_pending_match_valid = true;
+        pthread_mutex_unlock(&g_mutex);
+        llm_bot_log(LLOG_WARN, "!! gen busy, queued match %d", s->match_number);
         return;
     }
 
@@ -640,23 +786,38 @@ void llm_bot_submit_match(const MatchStats *s) {
     build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
 
     /* Build compact match-history section (last 1-3 matches) */
-    char history_section[512] = "";
+    char history_section[2048] = "";
     int  hs_len = 0;
     hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
-        "=== Recent match results (%d match(es)) ===\n",
+        "=== Recent match results (%d match(es)) ===\n"
+        "Telemetry is aggregated across ALL your bots for that match.\n",
         g_match_history_count);
     for (int hi = 0; hi < g_match_history_count; hi++) {
         const MatchStats *h = &g_match_history[hi];
         hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
-            "Match %d/%d: %.1fs | Survivors %d/%d (%.0f%%) | "
-            "Dmg %.0f | Kills %d | Winner: %s\n",
+            "Match %d/%d: %.1fs | Survivors %d/%d | avgHP %.0f%% | Winner: %s\n"
+            "  Combat : shots_fired=%d  shots_hit=%d  hit_rate=%.1f%%  dmg=%.0f  kills=%d\n"
+            "  Seeing : think_frames=%d  enemy_visible=%d (%.0f%%)  avg_nearest=%.2f u\n"
+            "  Motion : arena_bumps=%d  wall_bumps=%d  fire_frames=%d\n",
             h->match_number, h->total_matches,
             (double)h->duration,
             h->llm_survivors, h->llm_start,
             (double)(h->llm_avg_hp_frac * 100.0f),
+            h->winner_name,
+            h->shots_fired, h->shots_hit, (double)(h->hit_rate * 100.0f),
             (double)h->damage_dealt, h->kills,
-            h->winner_name);
+            h->think_frames, h->enemy_visible_frames,
+            (double)(h->visibility_frac * 100.0f),
+            (double)h->avg_nearest_dist,
+            h->arena_bumps, h->wall_bumps, h->fire_frames);
     }
+    hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
+        "Interpretation hints:\n"
+        "- hit_rate < 5%% => aim is bad or firing without a target; gate fire() on scan.\n"
+        "- visibility < 20%% => rarely sees enemies; move toward centre, not walls.\n"
+        "- arena_bumps >> 0 => wastes time ramming border; steer before reaching edge.\n"
+        "- wall_bumps >> 0 => collides with internal walls; use wall scan entries to avoid them.\n"
+        "- fire_frames ~ think_frames and hit_rate low => firing every frame into empty space.\n");
 
     build_system_prompt(ta->system_prompt, (int)sizeof(ta->system_prompt));
 

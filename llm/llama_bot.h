@@ -47,6 +47,17 @@ typedef struct {
     char  winner_name[32];
     char  script_error[512];
     char  runtime_error[512];
+    /* Per-match behavioural telemetry (LLM-owned bots, aggregated) */
+    int   think_frames;
+    int   enemy_visible_frames;
+    int   fire_frames;
+    int   shots_fired;
+    int   shots_hit;
+    int   arena_bumps;
+    int   wall_bumps;
+    float avg_nearest_dist;      /* mean nearest-enemy distance while visible */
+    float visibility_frac;       /* enemy_visible_frames / think_frames */
+    float hit_rate;              /* shots_hit / shots_fired */
 } MatchStats;
 
 void llm_bot_init(const char *host, int port, const char *script_path,

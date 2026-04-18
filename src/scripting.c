@@ -1,5 +1,6 @@
 #include "scripting.h"
 #include "walls.h"
+#include "update.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -12,13 +13,19 @@ typedef struct {
     float damage;
     float speed;
     float lifetime;
+    float fire_interval;   /* minimum seconds between two shots from this weapon */
 } WeaponStats;
 
 static const WeaponStats WEAPON_STATS[3] = {
-    [WEAPON_MACHINE_GUN] = { .damage = 5.0f,  .speed = 20.0f, .lifetime = 1.5f },
-    [WEAPON_AUTO_CANNON] = { .damage = 25.0f, .speed = 15.0f, .lifetime = 3.0f },
-    [WEAPON_LASER]       = { .damage = 2.0f,  .speed = 90.0f, .lifetime = 0.5f },
+    [WEAPON_MACHINE_GUN] = { .damage = 5.0f,  .speed = 20.0f, .lifetime = 1.5f, .fire_interval = 0.12f },
+    [WEAPON_AUTO_CANNON] = { .damage = 25.0f, .speed = 15.0f, .lifetime = 3.0f, .fire_interval = 0.60f },
+    [WEAPON_LASER]       = { .damage = 2.0f,  .speed = 90.0f, .lifetime = 0.5f, .fire_interval = 0.08f },
 };
+
+float scripting_weapon_fire_interval(WeaponType t) {
+    if (t < 0 || t > 2) return 0.1f;
+    return WEAPON_STATS[t].fire_interval;
+}
 
 static const float ARMOUR_MAX_HP[4]    = { 100.0f, 150.0f, 200.0f, 250.0f };
 static const float ARMOUR_MAX_SPEED[4] = {   5.0f,   3.5f,   2.0f,   0.8f };
@@ -126,10 +133,23 @@ static int lua_api_fire(lua_State *L) {
 
     float half_body = (CUBE_SIZE * b->config.body_scale) * 0.5f + 0.05f;
 
-    spawn_projectile(idx, b->script_id, b->x, b->z,
-                     fire_dx, fire_dz, -half_body, b->config.left_weapon);
-    spawn_projectile(idx, b->script_id, b->x, b->z,
-                     fire_dx, fire_dz, +half_body, b->config.right_weapon);
+    int shots = 0;
+    if (b->inertia.left_fire_cd <= 0.0f) {
+        spawn_projectile(idx, b->script_id, b->x, b->z,
+                         fire_dx, fire_dz, -half_body, b->config.left_weapon);
+        b->inertia.left_fire_cd = WEAPON_STATS[b->config.left_weapon].fire_interval;
+        shots++;
+    }
+    if (b->inertia.right_fire_cd <= 0.0f) {
+        spawn_projectile(idx, b->script_id, b->x, b->z,
+                         fire_dx, fire_dz, +half_body, b->config.right_weapon);
+        b->inertia.right_fire_cd = WEAPON_STATS[b->config.right_weapon].fire_interval;
+        shots++;
+    }
+    if (shots > 0 && b->script_id == LLM_SCRIPT_IDX) {
+        update_telemetry_inc_fire_frame();
+        update_telemetry_inc_shots_fired(shots);
+    }
     return 0;
 }
 
@@ -156,6 +176,8 @@ static int lua_api_scan(lua_State *L) {
     self->inertia.scan_hit_count = 0;
 
     bool self_is_llm = (self->script_id == LLM_SCRIPT_IDX);
+    float nearest_enemy_dist = 0.0f;
+    bool  saw_enemy = false;
 
     lua_newtable(L);
     int entry = 1;
@@ -175,6 +197,13 @@ static int lua_api_scan(lua_State *L) {
         float ddx  = b->x - sx;
         float ddz  = b->z - sz;
         float dist = sqrtf(ddx * ddx + ddz * ddz);
+
+        if (self_is_llm && b->script_id != LLM_SCRIPT_IDX) {
+            if (!saw_enemy || dist < nearest_enemy_dist) {
+                nearest_enemy_dist = dist;
+                saw_enemy = true;
+            }
+        }
 
         int h = self->inertia.scan_hit_count;
         if (h < MAX_SCAN_HITS) {
@@ -224,6 +253,9 @@ static int lua_api_scan(lua_State *L) {
         lua_rawseti(L, -2, entry++);
     }
 
+    if (self_is_llm) {
+        update_telemetry_inc_think_frame(saw_enemy, nearest_enemy_dist);
+    }
     return 1;
 }
 

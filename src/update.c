@@ -23,8 +23,26 @@ static float g_arena_half_z = 10.0f;
 static float g_llm_damage = 0.0f;
 static int   g_llm_kills  = 0;
 
+static LlmTelemetry g_tel;
+
 /* Last runtime error seen from an LLM bot, for LLM feedback */
 static char  g_last_runtime_error[512] = {0};
+
+void update_telemetry_reset(void) { memset(&g_tel, 0, sizeof(g_tel)); }
+void update_telemetry_get(LlmTelemetry *out) { *out = g_tel; }
+void update_telemetry_inc_fire_frame(void)   { g_tel.fire_frames++; }
+void update_telemetry_inc_shots_fired(int n) { g_tel.shots_fired += n; }
+void update_telemetry_inc_shots_hit(void)    { g_tel.shots_hit++; }
+void update_telemetry_inc_think_frame(bool enemy_visible, float nearest_dist) {
+    g_tel.think_frames++;
+    if (enemy_visible) {
+        g_tel.enemy_visible_frames++;
+        g_tel.nearest_dist_sum += nearest_dist;
+        g_tel.nearest_dist_samples++;
+    }
+}
+void update_telemetry_inc_arena_bump(void) { g_tel.arena_bumps++; }
+void update_telemetry_inc_wall_bump(void)  { g_tel.wall_bumps++; }
 
 /* Deduplicate noisy per-frame script errors: only print when the message
  * changes for a given bot slot. */
@@ -145,6 +163,9 @@ void update_inertia(Bot *bots, int count, float dt) {
             b->vx = 0.0f;
             b->vz = 0.0f;
         }
+
+        if (b->inertia.left_fire_cd  > 0.0f) b->inertia.left_fire_cd  -= dt;
+        if (b->inertia.right_fire_cd > 0.0f) b->inertia.right_fire_cd -= dt;
     }
 }
 
@@ -156,14 +177,19 @@ void update_movement(Bot *bots, int count, float dt) {
         b->x += b->vx * dt;
         b->z += b->vz * dt;
 
+        bool is_llm = (b->script_id == LLM_SCRIPT_IDX);
         float bx = g_arena_half_x - BOT_WALL_MARGIN;
         float bz = g_arena_half_z - BOT_WALL_MARGIN;
-        if (b->x >  bx) { b->x =  bx; b->vx = -b->vx; }
-        if (b->x < -bx) { b->x = -bx; b->vx = -b->vx; }
-        if (b->z >  bz) { b->z =  bz; b->vz = -b->vz; }
-        if (b->z < -bz) { b->z = -bz; b->vz = -b->vz; }
+        bool bumped_arena = false;
+        if (b->x >  bx) { b->x =  bx; b->vx = -b->vx; bumped_arena = true; }
+        if (b->x < -bx) { b->x = -bx; b->vx = -b->vx; bumped_arena = true; }
+        if (b->z >  bz) { b->z =  bz; b->vz = -b->vz; bumped_arena = true; }
+        if (b->z < -bz) { b->z = -bz; b->vz = -b->vz; bumped_arena = true; }
+        if (is_llm && bumped_arena) g_tel.arena_bumps++;
 
+        float px = b->x, pz = b->z;
         walls_push_out_bot(&b->x, &b->z, &b->vx, &b->vz);
+        if (is_llm && (b->x != px || b->z != pz)) g_tel.wall_bumps++;
     }
 }
 
@@ -193,8 +219,10 @@ void update_projectiles(Proj *projs, int *pcount, Bot *bots, int bcount, float d
                 float dz = p->z - b->z;
                 if (dx * dx + dz * dz < HIT_RADIUS2) {
                     b->hp -= p->damage;
-                    if (p->owner_script == LLM_SCRIPT_IDX)
+                    if (p->owner_script == LLM_SCRIPT_IDX) {
                         g_llm_damage += p->damage;
+                        g_tel.shots_hit++;
+                    }
 
                     Color ic = {p->r, p->g, p->b, 255};
                     fx_impact(p->x, 0.25f, p->z, ic);

@@ -1,79 +1,40 @@
--- bot_llm.lua — Laser + MachineGun, medium armour.
--- HP=200, speed=2.0. Advances toward enemies and fires both weapons.
--- Retreats when HP drops below 30%. Steers around walls.
+-- bot_llm.lua — minimal baseline.
+-- Wanders in a slowly changing direction and fires in random directions.
+-- Intentionally simple: barely uses scan() so the LLM has maximum room to
+-- propose improvements. Different bots behave differently thanks to the seed
+-- being mixed with their spawn position.
 
 function init()
     return {
-        left_weapon  = "Laser",
-        right_weapon = "MachineGun",
-        armour       = 2
+        left_weapon  = "MachineGun",
+        right_weapon = "Laser",
+        armour       = 1,
     }
 end
 
-math.randomseed()
+math.randomseed(os.time()
+                + math.floor((self_x or 0) * 1000)
+                + math.floor((self_z or 0) * 1000))
 
-local fire_cd      = math.random() * 0.05
 local wander_angle = math.random() * math.pi * 2
 local wander_timer = 0.0
-
-local function wall_avoid(targets)
-    local ax, az = 0, 0
-    for _, r in ipairs(targets) do
-        if r.type == "wall" and r.distance < 2.5 then
-            local dx = self_x - r.x
-            local dz = self_z - r.z
-            local d  = math.max(r.distance, 0.05)
-            ax = ax + dx / (d * d)
-            az = az + dz / (d * d)
-        end
-    end
-    return ax, az
-end
+local fire_timer   = 0.0
 
 function think(dt)
-    fire_cd      = fire_cd      - dt
     wander_timer = wander_timer - dt
+    fire_timer   = fire_timer   - dt
 
-    local targets = scan(18.0)
-    local ax, az  = wall_avoid(targets)
-
-    local enemy, min_dist = nil, math.huge
-    for _, t in ipairs(targets) do
-        if t.type == "bot" and t.team ~= self_team and t.distance < min_dist then
-            min_dist = t.distance
-            enemy    = t
-        end
+    if wander_timer <= 0.0 then
+        wander_angle = wander_angle + (math.random() - 0.5) * 1.2
+        wander_timer = 0.5 + math.random() * 1.0
     end
 
-    if enemy then
-        local dx = enemy.x - self_x
-        local dz = enemy.z - self_z
-        local mx, mz
+    move(math.cos(wander_angle), math.sin(wander_angle))
 
-        if self_hp < self_max_hp * 0.30 then
-            mx = -dx + ax;  mz = -dz + az
-        elseif enemy.distance < 3.0 then
-            mx = -dx + ax;  mz = -dz + az
-        else
-            mx =  dx + ax;  mz =  dz + az
-        end
-        move(mx, mz)
-
-        if fire_cd <= 0.0 then
-            fire(dx, dz)
-            fire_cd = 0.05
-        end
-    else
-        local al = math.sqrt(ax * ax + az * az)
-        if al > 0.4 then
-            wander_angle = math.atan(az, ax) + (math.random() - 0.5) * 0.5
-            wander_timer = 0.5
-        elseif wander_timer <= 0.0 then
-            wander_angle = math.random() * math.pi * 2
-            wander_timer = 1.0 + math.random()
-        end
-        local wx = math.cos(wander_angle) + ax
-        local wz = math.sin(wander_angle) + az
-        move(wx, wz)
+    if fire_timer <= 0.0 then
+        local fa = math.random() * math.pi * 2
+        fire(math.cos(fa), math.sin(fa))
+        -- Engine caps per-weapon fire rate; this timer just saves a few calls.
+        fire_timer = 0.2
     end
 end

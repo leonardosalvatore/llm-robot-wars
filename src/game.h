@@ -36,6 +36,8 @@ typedef struct {
     float scan_hit_z[MAX_SCAN_HITS];
     int   scan_hit_type[MAX_SCAN_HITS]; /* 0 = bot, 1 = wall */
     int   scan_hit_count;
+    float left_fire_cd;    /* seconds until left weapon may fire again */
+    float right_fire_cd;   /* seconds until right weapon may fire again */
 } BotInertia;
 
 typedef struct {
