@@ -63,8 +63,10 @@ add_executable(llama-wars
 
 target_include_directories(llama-wars PRIVATE
     src
-    "${raygui_SOURCE_DIR}/src"
     llm
+)
+target_include_directories(llama-wars SYSTEM PRIVATE
+    "${raygui_SOURCE_DIR}/src"
 )
 target_link_libraries(llama-wars PRIVATE
     raylib
