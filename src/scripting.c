@@ -17,9 +17,9 @@ typedef struct {
 } WeaponStats;
 
 static const WeaponStats WEAPON_STATS[3] = {
-    [WEAPON_MACHINE_GUN] = { .damage = 5.0f,  .speed = 20.0f, .lifetime = 1.5f, .fire_interval = 0.12f },
-    [WEAPON_AUTO_CANNON] = { .damage = 25.0f, .speed = 15.0f, .lifetime = 3.0f, .fire_interval = 0.60f },
-    [WEAPON_LASER]       = { .damage = 2.0f,  .speed = 90.0f, .lifetime = 0.5f, .fire_interval = 0.08f },
+    [WEAPON_MACHINE_GUN] = { .damage = 5.0f,  .speed = 20.0f, .lifetime = 3.0f, .fire_interval = 0.12f },
+    [WEAPON_AUTO_CANNON] = { .damage = 25.0f, .speed = 15.0f, .lifetime = 6.0f, .fire_interval = 0.60f },
+    [WEAPON_LASER]       = { .damage = 2.0f,  .speed = 90.0f, .lifetime = 1.0f, .fire_interval = 0.08f },
 };
 
 float scripting_weapon_fire_interval(WeaponType t) {

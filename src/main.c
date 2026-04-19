@@ -360,6 +360,80 @@ static void orbit_camera_around_target(Camera3D *camera, float yaw_delta, float 
 }
 
 /* ----------------------------------------------------------------------- */
+/* spinner_enhance: run AFTER GuiSpinner() with the same bounds. Adds
+ *  - mouse wheel over the spinner → ±10
+ *  - holding Left / Right arrow for > 0.5 s while hovering → repeat step ±1
+ *    (initial keypress already moves by one via the arrow key handling built
+ *    into GuiSpinner's edit mode; here we just auto-repeat while held). */
+static void spinner_enhance(Rectangle r, int *value, int min_v, int max_v) {
+    Vector2 mp = GetMousePosition();
+    bool hover = CheckCollisionPointRec(mp, r);
+    if (!hover) return;
+
+    int wheel = (int)GetMouseWheelMove();
+    if (wheel != 0) {
+        int nv = *value + wheel * 10;
+        if (nv < min_v) nv = min_v;
+        if (nv > max_v) nv = max_v;
+        *value = nv;
+    }
+
+    static const int MAX_TRACKED = 32;
+    static const void *key_ptrs[32];
+    static float hold_time[32];
+    static float repeat_acc[32];
+    static bool  initialised = false;
+    if (!initialised) {
+        for (int i = 0; i < MAX_TRACKED; i++) {
+            key_ptrs[i]   = NULL;
+            hold_time[i]  = 0.0f;
+            repeat_acc[i] = 0.0f;
+        }
+        initialised = true;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_TRACKED; i++) {
+        if (key_ptrs[i] == (const void *)value) { slot = i; break; }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < MAX_TRACKED; i++) {
+            if (key_ptrs[i] == NULL) {
+                key_ptrs[i] = (const void *)value;
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) return;
+
+    bool left_down  = IsKeyDown(KEY_LEFT);
+    bool right_down = IsKeyDown(KEY_RIGHT);
+    int dir = 0;
+    if (left_down  && !right_down) dir = -1;
+    else if (right_down && !left_down) dir = +1;
+
+    if (dir == 0) {
+        hold_time[slot]  = 0.0f;
+        repeat_acc[slot] = 0.0f;
+        return;
+    }
+
+    float dt = GetFrameTime();
+    hold_time[slot] += dt;
+    if (hold_time[slot] < 0.5f) return;
+
+    repeat_acc[slot] += dt;
+    const float REPEAT_PERIOD = 0.05f; /* 20 steps/s once repeating kicks in */
+    while (repeat_acc[slot] >= REPEAT_PERIOD) {
+        repeat_acc[slot] -= REPEAT_PERIOD;
+        int nv = *value + dir;
+        if (nv < min_v) nv = min_v;
+        if (nv > max_v) nv = max_v;
+        *value = nv;
+    }
+}
+
 static bool show_config_screen(GameConfig *cfg) {
     /* Probe llama-server health each time the config screen is shown */
     bool server_available = llama_server_healthy(cfg->llm_host, cfg->llm_port);
@@ -404,35 +478,47 @@ static bool show_config_screen(GameConfig *cfg) {
         /* Map width (X axis — the long side for opposite-corners) */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Map width (10-200)");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &map_width_int, 10, 200, edit[0]))
-            edit[0] = !edit[0];
-        cfg->map_width = (float)map_width_int;
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &map_width_int, 10, 200, edit[0]))
+                edit[0] = !edit[0];
+            spinner_enhance(r, &map_width_int, 10, 200);
+            cfg->map_width = (float)map_width_int;
+        }
         row++;
 
         /* Map height (Z axis) */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Map height (10-200)");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &map_height_int, 10, 200, edit[1]))
-            edit[1] = !edit[1];
-        cfg->map_height = (float)map_height_int;
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &map_height_int, 10, 200, edit[1]))
+                edit[1] = !edit[1];
+            spinner_enhance(r, &map_height_int, 10, 200);
+            cfg->map_height = (float)map_height_int;
+        }
         row++;
 
         /* Wall count */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Walls (0-40)");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->num_walls, 0, 40, edit[2]))
-            edit[2] = !edit[2];
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &cfg->num_walls, 0, 40, edit[2]))
+                edit[2] = !edit[2];
+            spinner_enhance(r, &cfg->num_walls, 0, 40);
+        }
         row++;
 
         /* Wall size */
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Wall size (1-5)");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->wall_size, 1, 5, edit[3]))
-            edit[3] = !edit[3];
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &cfg->wall_size, 1, 5, edit[3]))
+                edit[3] = !edit[3];
+            spinner_enhance(r, &cfg->wall_size, 1, 5);
+        }
         row++;
 
         /* Spawn mode toggle */
@@ -511,9 +597,13 @@ static bool show_config_screen(GameConfig *cfg) {
         if (!cfg->use_llm) GuiDisable();
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Number of matches");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->num_matches, 1, 100, edit[4]))
-            edit[4] = !edit[4];
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &cfg->num_matches, 1, 100, edit[4]))
+                edit[4] = !edit[4];
+            if (cfg->use_llm)
+                spinner_enhance(r, &cfg->num_matches, 1, 100);
+        }
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -521,9 +611,13 @@ static bool show_config_screen(GameConfig *cfg) {
         if (!cfg->use_llm) GuiDisable();
         GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
                  "Match duration (s)");
-        if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
-                       NULL, &cfg->match_duration, 1, 600, edit[5]))
-            edit[5] = !edit[5];
+        {
+            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &cfg->match_duration, 1, 600, edit[5]))
+                edit[5] = !edit[5];
+            if (cfg->use_llm)
+                spinner_enhance(r, &cfg->match_duration, 1, 600);
+        }
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -559,14 +653,13 @@ static bool show_config_screen(GameConfig *cfg) {
             GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
                                  (float)LBL_W, (float)ROW_H},
                      script_labels[s]);
-            if (GuiSpinner((Rectangle){(float)CTL_X, (float)ROW_Y,
-                                       (float)CTL_W, (float)(ROW_H - 4)},
-                           NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 6]))
+            Rectangle r = {(float)CTL_X, (float)ROW_Y,
+                           (float)CTL_W, (float)(ROW_H - 4)};
+            if (GuiSpinner(r, NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 6]))
                 edit[s + 6] = !edit[s + 6];
+            spinner_enhance(r, &cfg->bots_per_type[s], 0, 60);
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
-                Rectangle r = {(float)CTL_X, (float)ROW_Y,
-                               (float)CTL_W, (float)(ROW_H - 4)};
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
                     edit[s + 6] = false;
             }
