@@ -4,12 +4,24 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_DIR="${SCRIPT_DIR}/../llama.cpp/llama-b8532-bin-ubuntu-rocm-7.2-x64/llama-b8532"
-DEFAULT_MODEL="${LLAMA_DIR}/Ministral-3-8B-Reasoning-2512-Q5_K_M.gguf"
+#DEFAULT_MODEL="${LLAMA_DIR}/Ministral-3-8B-Reasoning-2512-Q5_K_M.gguf"
 #DEFAULT_MODEL="${LLAMA_DIR}/Ministral-3-8B-Reasoning-2512-Q8_0.gguf"
 #DEFAULT_MODEL="${LLAMA_DIR}/Qwen3.5-9b-Sushi-Coder-RL.Q4_K_M.gguf"
 DEFAULT_MODEL="${LLAMA_DIR}/qwen2.5-coder-7b-instruct-q8_0.gguf"
+#DEFAULT_MODEL="${LLAMA_DIR}/ruvltra-claude-code-0.5b-q4_k_m.gguf"
 
 MODEL="${1:-$DEFAULT_MODEL}"
+
+if [ -z "$MODEL" ]; then
+    echo "ERROR: no model specified." >&2
+    echo "  Pass one as: $0 /path/to/model.gguf" >&2
+    echo "  Or uncomment a DEFAULT_MODEL line in this script." >&2
+    exit 1
+fi
+if [ ! -f "$MODEL" ]; then
+    echo "ERROR: model file not found: $MODEL" >&2
+    exit 1
+fi
 
 cd "$LLAMA_DIR"
 

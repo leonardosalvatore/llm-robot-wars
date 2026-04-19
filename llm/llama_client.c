@@ -206,7 +206,8 @@ int llama_generate(const char *host, int port,
         return -1;
     }
     int body_len = snprintf(json_body, (size_t)body_cap,
-        "{\"messages\":["
+        "{\"model\":\"default\","
+        "\"messages\":["
         "{\"role\":\"system\",\"content\":\"%s\"},"
         "{\"role\":\"user\",\"content\":\"%s\"}"
         "],"

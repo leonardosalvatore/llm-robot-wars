@@ -476,8 +476,10 @@ static bool show_config_screen(GameConfig *cfg) {
                 GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
                                      (float)LBL_W, (float)ROW_H},
                          "LLM Server");
-                GuiLabel((Rectangle){(float)(CTL_X + ROW_H), (float)ROW_Y,
-                                     260.0f, (float)ROW_H},
+                /* Place hint well to the right of the "Use LlaMa AI" label
+                   so it doesn't overlap the checkbox text. */
+                GuiLabel((Rectangle){(float)(CTL_X + 160), (float)ROW_Y,
+                                     300.0f, (float)ROW_H},
                          "(start llama-server first)");
             } else {
                 GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y,
