@@ -9,6 +9,7 @@
 #define TOTAL_SCRIPTS     7
 #define LLM_SCRIPT_IDX    6
 #define MAX_SCAN_HITS    64
+#define MAX_WEAPONS       4
 
 typedef enum {
     WEAPON_MACHINE_GUN = 0,
@@ -16,13 +17,48 @@ typedef enum {
     WEAPON_LASER       = 2
 } WeaponType;
 
+typedef enum {
+    LOCO_WHEELS = 0,
+    LOCO_TRACKS = 1,
+    LOCO_LEGS_4 = 2,
+    LOCO_LEGS_2 = 3
+} Locomotion;
+
+typedef enum {
+    BODY_CUBE     = 0,
+    BODY_TALL     = 1,
+    BODY_FLAT     = 2,
+    BODY_LONG_LOW = 3,
+    BODY_TOWER    = 4,
+    BODY_WEDGE    = 5,
+    BODY_TANK     = 6
+} BodyShape;
+
+typedef enum {
+    MOUNT_LEFT      = 0,
+    MOUNT_RIGHT     = 1,
+    MOUNT_TOP       = 2,
+    MOUNT_TOP_FRONT = 3,
+    MOUNT_TOP_REAR  = 4
+} WeaponMount;
+
 typedef struct {
-    WeaponType left_weapon;
-    WeaponType right_weapon;
-    int        armour;       /* 0-3 */
+    WeaponType  type;
+    WeaponMount mount;
+} WeaponSlot;
+
+typedef struct {
+    Locomotion locomotion;
+    BodyShape  body;
+    int        weapon_count;
+    WeaponSlot weapons[MAX_WEAPONS];
     float      max_hp;
     float      max_speed;
-    float      body_scale;
+    float      turn_rate;     /* body angular speed in rad/s */
+    float      body_sx;       /* width  scale (relative to CUBE_SIZE) */
+    float      body_sy;       /* height scale */
+    float      body_sz;       /* depth  scale */
+    float      total_weight;  /* body + weapons (for diagnostics) */
     int        script_idx;
 } BotConfig;
 
@@ -36,8 +72,8 @@ typedef struct {
     float scan_hit_z[MAX_SCAN_HITS];
     int   scan_hit_type[MAX_SCAN_HITS]; /* 0 = bot, 1 = wall */
     int   scan_hit_count;
-    float left_fire_cd;    /* seconds until left weapon may fire again */
-    float right_fire_cd;   /* seconds until right weapon may fire again */
+    float weapon_cd[MAX_WEAPONS]; /* per-weapon fire cooldown */
+    float move_anim_t;            /* phase advanced by speed; drives leg/wheel anim */
 } BotInertia;
 
 typedef struct {

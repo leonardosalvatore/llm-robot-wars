@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <math.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -171,35 +172,98 @@ static void extract_lua(const char *response, char *out, int out_size) {
 }
 
 /* ----------------------------------------------------------------------- */
+/* Smoke-test harness: registers fake move/fire/fire_weapon/scan into the
+ * Lua state, then runs a multi-frame combat simulation with 4 enemies
+ * orbiting the (stationary) bot from the four cardinal directions. We
+ * record every fire/fire_weapon call and check whether at least one of
+ * them was aimed within ~30 degrees of any of the four enemies. If not,
+ * we reject the script with a detailed report so the next regeneration
+ * gets actionable feedback. */
+#define SMOKE_NUM_ENEMIES 4
+#define SMOKE_AIM_COS     0.866   /* cos(30 deg) */
+
+typedef struct {
+    int    fire_calls_total;
+    int    fire_at_enemy[SMOKE_NUM_ENEMIES];
+    int    enemies_targeted_mask;
+    double bot_x, bot_z;
+    double enemy_x[SMOKE_NUM_ENEMIES];
+    double enemy_z[SMOKE_NUM_ENEMIES];
+    double enemy_vx[SMOKE_NUM_ENEMIES];
+    double enemy_vz[SMOKE_NUM_ENEMIES];
+} SmokeState;
+
+static SmokeState g_smoke;
+
+static void smoke_record_fire(double dx, double dz) {
+    g_smoke.fire_calls_total++;
+    double len = sqrt(dx * dx + dz * dz);
+    if (len < 1e-6) return;
+    double nx = dx / len;
+    double nz = dz / len;
+    for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
+        double edx = g_smoke.enemy_x[i] - g_smoke.bot_x;
+        double edz = g_smoke.enemy_z[i] - g_smoke.bot_z;
+        double el  = sqrt(edx * edx + edz * edz);
+        if (el < 1e-6) continue;
+        double cosang = (nx * edx + nz * edz) / el;
+        if (cosang >= SMOKE_AIM_COS) {
+            g_smoke.fire_at_enemy[i]++;
+            g_smoke.enemies_targeted_mask |= (1 << i);
+        }
+    }
+}
+
 static int smoke_move(lua_State *L) {
     (void)L;
     return 0;
 }
 
 static int smoke_fire(lua_State *L) {
-    (void)L;
+    double dx = (double)luaL_checknumber(L, 1);
+    double dz = (double)luaL_checknumber(L, 2);
+    smoke_record_fire(dx, dz);
+    return 0;
+}
+
+static int smoke_fire_weapon(lua_State *L) {
+    (void)luaL_checkinteger(L, 1);
+    double dx = (double)luaL_checknumber(L, 2);
+    double dz = (double)luaL_checknumber(L, 3);
+    smoke_record_fire(dx, dz);
     return 0;
 }
 
 static int smoke_scan(lua_State *L) {
-    (void)luaL_optnumber(L, 1, 18.0);
+    (void)luaL_optnumber(L, 1, 0.0);
 
     lua_newtable(L);
+    int slot = 1;
 
-    lua_newtable(L);
-    lua_pushstring(L, "bot"); lua_setfield(L, -2, "type");
-    lua_pushnumber(L, 3.0);   lua_setfield(L, -2, "x");
-    lua_pushnumber(L, 2.0);   lua_setfield(L, -2, "z");
-    lua_pushnumber(L, 3.6);   lua_setfield(L, -2, "distance");
-    lua_pushinteger(L, 1);    lua_setfield(L, -2, "team");
-    lua_rawseti(L, -2, 1);
+    for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
+        double dx   = g_smoke.enemy_x[i] - g_smoke.bot_x;
+        double dz   = g_smoke.enemy_z[i] - g_smoke.bot_z;
+        double dist = sqrt(dx * dx + dz * dz);
 
+        lua_newtable(L);
+        lua_pushstring(L, "bot");                lua_setfield(L, -2, "type");
+        lua_pushnumber(L, g_smoke.enemy_x[i]);   lua_setfield(L, -2, "x");
+        lua_pushnumber(L, g_smoke.enemy_z[i]);   lua_setfield(L, -2, "z");
+        lua_pushnumber(L, dist);                 lua_setfield(L, -2, "distance");
+        lua_pushinteger(L, 1);                   lua_setfield(L, -2, "team");
+        lua_pushnumber(L, 100.0);                lua_setfield(L, -2, "hp");
+        lua_pushnumber(L, 150.0);                lua_setfield(L, -2, "max_hp");
+        lua_rawseti(L, -2, slot++);
+    }
+
+    /* A distant wall so that wall-avoidance code paths get exercised but
+     * the wall does not crowd the enemies. */
     lua_newtable(L);
     lua_pushstring(L, "wall"); lua_setfield(L, -2, "type");
-    lua_pushnumber(L, -1.0);   lua_setfield(L, -2, "x");
-    lua_pushnumber(L,  0.5);   lua_setfield(L, -2, "z");
-    lua_pushnumber(L,  1.2);   lua_setfield(L, -2, "distance");
-    lua_rawseti(L, -2, 2);
+    lua_pushnumber(L, 18.0);   lua_setfield(L, -2, "x");
+    lua_pushnumber(L,  0.0);   lua_setfield(L, -2, "z");
+    lua_pushnumber(L, 18.0);   lua_setfield(L, -2, "distance");
+    lua_rawseti(L, -2, slot++);
 
     return 1;
 }
@@ -215,6 +279,40 @@ static void smoke_set_globals(lua_State *L, double x, double z,
     lua_pushnumber(L, max_hp); lua_setglobal(L, "self_max_hp");
 }
 
+static void smoke_init_arena(void) {
+    memset(&g_smoke, 0, sizeof(g_smoke));
+
+    /* Four enemies, distance ~3.5u from the bot, one in each cardinal
+     * direction, each moving tangentially at a different speed so the bot
+     * has to keep re-acquiring across the simulation. */
+    /* +x  (front)   slow tangent */
+    g_smoke.enemy_x[0] =  3.5; g_smoke.enemy_z[0] =  0.0;
+    g_smoke.enemy_vx[0] =  0.0; g_smoke.enemy_vz[0] =  1.5;
+    /* -x  (back)    medium tangent (opposite direction) */
+    g_smoke.enemy_x[1] = -3.5; g_smoke.enemy_z[1] =  0.0;
+    g_smoke.enemy_vx[1] =  0.0; g_smoke.enemy_vz[1] = -2.5;
+    /* +z  (left)    fast tangent */
+    g_smoke.enemy_x[2] =  0.0; g_smoke.enemy_z[2] =  3.5;
+    g_smoke.enemy_vx[2] =  3.0; g_smoke.enemy_vz[2] =  0.0;
+    /* -z  (right)   slow tangent */
+    g_smoke.enemy_x[3] =  0.0; g_smoke.enemy_z[3] = -3.5;
+    g_smoke.enemy_vx[3] = -1.0; g_smoke.enemy_vz[3] =  0.0;
+}
+
+static void smoke_step_enemies(double dt) {
+    for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
+        g_smoke.enemy_x[i] += g_smoke.enemy_vx[i] * dt;
+        g_smoke.enemy_z[i] += g_smoke.enemy_vz[i] * dt;
+        /* Bounce them back so they stay within scan-and-fire range (5u). */
+        double r = sqrt(g_smoke.enemy_x[i] * g_smoke.enemy_x[i]
+                      + g_smoke.enemy_z[i] * g_smoke.enemy_z[i]);
+        if (r > 5.0) {
+            g_smoke.enemy_vx[i] = -g_smoke.enemy_vx[i];
+            g_smoke.enemy_vz[i] = -g_smoke.enemy_vz[i];
+        }
+    }
+}
+
 static bool smoke_test_script(const char *path, char *err, int err_size) {
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -223,20 +321,28 @@ static bool smoke_test_script(const char *path, char *err, int err_size) {
     }
 
     luaL_openlibs(L);
-    lua_register(L, "move", smoke_move);
-    lua_register(L, "fire", smoke_fire);
-    lua_register(L, "scan", smoke_scan);
+    lua_register(L, "move",        smoke_move);
+    lua_register(L, "fire",        smoke_fire);
+    lua_register(L, "fire_weapon", smoke_fire_weapon);
+    lua_register(L, "scan",        smoke_scan);
 
-    smoke_set_globals(L, 0.0, 0.0, 180.0, 250.0);
-
+    /* Stage 1: load the script with NO self_* globals set. This mirrors what
+     * the engine does (scripting_load runs luaL_dofile before any per-frame
+     * globals exist) and rejects scripts whose file-scope code touches
+     * self_x / self_z / self_team / self_hp. */
     if (luaL_dofile(L, path) != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
-        snprintf(err, (size_t)err_size, "smoke test load error: %s",
+        snprintf(err, (size_t)err_size,
+                 "smoke test: file-scope load crashed: %s. "
+                 "Move any code that reads self_x/self_z/self_team/self_hp "
+                 "into init() or think(); those globals are nil at file scope.",
                  msg ? msg : "(unknown error)");
         lua_close(L);
         return false;
     }
 
+    /* Stage 2: init() must be a function and return a table. */
+    smoke_set_globals(L, 0.0, 0.0, 250.0, 250.0);
     lua_getglobal(L, "init");
     if (lua_type(L, -1) != LUA_TFUNCTION) {
         snprintf(err, (size_t)err_size, "smoke test: init() missing");
@@ -257,39 +363,74 @@ static bool smoke_test_script(const char *path, char *err, int err_size) {
     }
     lua_pop(L, 1);
 
-    smoke_set_globals(L, 0.0, 0.0, 180.0, 250.0);
     lua_getglobal(L, "think");
     if (lua_type(L, -1) != LUA_TFUNCTION) {
         snprintf(err, (size_t)err_size, "smoke test: think() missing");
         lua_close(L);
         return false;
     }
-    lua_pushnumber(L, 0.016);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
-        snprintf(err, (size_t)err_size, "smoke test think() error: %s",
-                 msg ? msg : "(unknown error)");
-        lua_close(L);
-        return false;
-    }
+    lua_pop(L, 1);
 
-    smoke_set_globals(L, 0.2, -0.1, 40.0, 250.0);
-    lua_getglobal(L, "think");
-    if (lua_type(L, -1) != LUA_TFUNCTION) {
-        snprintf(err, (size_t)err_size, "smoke test: think() missing on second pass");
-        lua_close(L);
-        return false;
-    }
-    lua_pushnumber(L, 0.033);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
-        snprintf(err, (size_t)err_size, "smoke test think() error: %s",
-                 msg ? msg : "(unknown error)");
-        lua_close(L);
-        return false;
+    /* Stage 3: 60-frame combat simulation with 4 moving enemies around the
+     * stationary bot. dt = 0.05s, total 3.0 simulated seconds. HP starts
+     * full and drops to a "low" value at the half-way mark so both the
+     * normal-combat and panic/low-HP code paths get exercised. */
+    smoke_init_arena();
+
+    const int    FRAMES   = 60;
+    const double DT       = 0.05;
+    const double FULL_HP  = 250.0;
+
+    for (int frame = 0; frame < FRAMES; frame++) {
+        smoke_step_enemies(DT);
+        double hp = (frame < FRAMES / 2) ? (FULL_HP * 0.95) : (FULL_HP * 0.10);
+
+        smoke_set_globals(L, g_smoke.bot_x, g_smoke.bot_z, hp, FULL_HP);
+
+        lua_getglobal(L, "think");
+        if (lua_type(L, -1) != LUA_TFUNCTION) {
+            snprintf(err, (size_t)err_size,
+                     "smoke test: think() vanished at frame %d/%d", frame + 1, FRAMES);
+            lua_close(L);
+            return false;
+        }
+        lua_pushnumber(L, DT);
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            const char *msg = lua_tostring(L, -1);
+            snprintf(err, (size_t)err_size,
+                     "smoke test think() crashed at frame %d/%d: %s",
+                     frame + 1, FRAMES, msg ? msg : "(unknown error)");
+            lua_close(L);
+            return false;
+        }
     }
 
     lua_close(L);
+
+    /* Stage 4: combat report. */
+    if (g_smoke.enemies_targeted_mask == 0) {
+        snprintf(err, (size_t)err_size,
+                 "smoke test combat report: in 3.0s of simulation with 4 enemies "
+                 "orbiting at distance ~3.5u (front/back/left/right, varied "
+                 "speeds) the script issued %d fire/fire_weapon call(s) but ZERO "
+                 "of them were aimed within 30 degrees of ANY enemy. The bot "
+                 "will not deal damage. In think(), iterate scan(0) entries, "
+                 "find any with t.team ~= self_team, and call "
+                 "fire(t.x - self_x, t.z - self_z) every frame the enemy is "
+                 "within firing range.",
+                 g_smoke.fire_calls_total);
+        return false;
+    }
+
+    /* Pass — log a one-line summary so the user can see how thoroughly the
+     * script engaged the four cardinal targets. */
+    int hit_count = 0;
+    for (int i = 0; i < SMOKE_NUM_ENEMIES; i++)
+        if (g_smoke.enemies_targeted_mask & (1 << i)) hit_count++;
+    llm_bot_log(LLOG_OK,
+                ">> smoke combat: aimed at %d/%d enemies, %d fire calls",
+                hit_count, SMOKE_NUM_ENEMIES, g_smoke.fire_calls_total);
+
     err[0] = '\0';
     return true;
 }
@@ -428,46 +569,75 @@ static void build_system_prompt(char *dst, int dst_size) {
         "You are iteratively improving a Lua script for an arena combat robot game.\n"
         "\n"
         "=== Game API ===\n"
-        "move(dx, dz)   -- set movement direction; internally normalised; magnitude ignored.\n"
-        "               -- Do NOT multiply dx/dz by a speed scalar -- pass a unit direction.\n"
-        "fire(dx, dz)   -- aim turret toward (dx,dz) and fire BOTH weapons this frame.\n"
-        "               -- There is no internal cooldown; call from your own timer.\n"
-        "scan(radius)   -- radius argument is ignored; returns all bots (LOS) + walls.\n"
-        "               -- entries: {type=\"bot\",  x, z, distance, team, hp, max_hp}\n"
-        "                           {type=\"wall\", x, z, distance}   (x,z = nearest point)\n"
+        "move(dx, dz)        -- set movement direction; internally normalised; magnitude ignored.\n"
+        "                    -- Do NOT multiply dx/dz by a speed scalar -- pass a unit direction.\n"
+        "fire(dx, dz)        -- aim turret toward (dx,dz) and fire ALL mounted weapons this frame.\n"
+        "                    -- Each weapon has its own cooldown; safe to call every tick.\n"
+        "fire_weapon(i, dx, dz) -- like fire() but only weapon i (1-based index into weapons[]).\n"
+        "scan(radius)        -- radius argument is ignored; returns all bots (LOS) + walls.\n"
+        "                    -- entries: {type=\"bot\",  x, z, distance, team, hp, max_hp}\n"
+        "                                {type=\"wall\", x, z, distance}   (x,z = nearest point)\n"
         "Per-frame globals:\n"
-        "  self_x, self_z        -- world position (z is the forward axis)\n"
+        "  self_x, self_z        -- world position\n"
         "  self_team             -- integer script id of this bot's team\n"
         "  self_hp, self_max_hp  -- current and maximum hit points\n"
-        "  self_left_weapon, self_right_weapon  -- string, same values as init()\n"
-        "  self_armour           -- integer 0..3\n"
-        "  self_max_speed        -- current max linear speed in units/second\n"
-        "init() must return: {left_weapon=..., right_weapon=..., armour=...}\n"
+        "  self_locomotion       -- string: \"wheels\"|\"tracks\"|\"4legs\"|\"2legs\"\n"
+        "  self_body             -- string: \"cube\"|\"tall\"|\"flat\"|\"long_low\"|\"tower\"|\"wedge\"|\"tank\"\n"
+        "  self_weapons          -- array of weapon-type strings, 1..4\n"
+        "  self_weapon_count     -- integer 1..4\n"
+        "  self_max_speed        -- current max linear speed in units/second (after weight)\n"
         "\n"
-        "=== Weapon stats (per projectile; both weapons fire together on fire()) ===\n"
-        "                 damage  speed(u/s)  lifetime(s)  range  turret_turn(rad/s)  fire_interval(s)\n"
-        "  MachineGun       5      20            3.0         60          8                0.12\n"
-        "  AutoCannon      25      15            6.0         90          4                0.60\n"
-        "  Laser            2      90            1.0         90          2                0.08\n"
+        "init() must return a table with these fields:\n"
+        "  locomotion = \"wheels\" | \"tracks\" | \"4legs\" | \"2legs\"\n"
+        "  body       = \"cube\" | \"tall\" | \"flat\" | \"long_low\" | \"tower\" | \"wedge\" | \"tank\"\n"
+        "  weapons    = { { type=<W>, mount=<M> }, ... }    -- 1 to 4 entries\n"
+        "    where <W> is \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
+        "    and   <M> is \"left\" | \"right\" | \"top\" | \"top_front\" | \"top_rear\" (each unique)\n"
+        "Any field may be omitted; defaults are wheels + cube + 2x AutoCannon (left/right).\n"
+        "The legacy `armour` field is no longer used and will be ignored.\n"
+        "\n"
+        "=== Weapon stats (per projectile) ===\n"
+        "                 damage  speed(u/s)  lifetime(s)  fire_interval(s)  weight  turret_turn(rad/s)\n"
+        "  MachineGun       5      20            3.0         0.12              0.3     8\n"
+        "  AutoCannon      25      15            6.0         0.60              0.9     4\n"
+        "  Laser            2      90            1.0         0.08              0.4     2\n"
         "Hit radius on target is ~0.6 units. No projectile drop.\n"
         "fire() is engine-rate-limited per weapon: if its cooldown has not elapsed the\n"
         "shot is silently dropped. You can safely call fire() every frame; excess calls\n"
         "cost nothing. But to aim better, still gate fire() on having a target in range.\n"
+        "Turret turn-rate uses the SLOWEST of all mounted weapons' turret_turn values.\n"
         "\n"
-        "=== Armour / chassis stats (integer armour 0..3) ===\n"
-        "                 max_hp  max_speed(u/s)  body_turn(rad/s)  body_scale\n"
-        "  armour 0        100     5.0             10                0.7\n"
-        "  armour 1        150     3.5              6                1.0\n"
-        "  armour 2        200     2.0              3.5              1.3\n"
-        "  armour 3        250     0.8              2.0              1.6\n"
-        "Turret turn rate uses the SLOWER of the two weapons' rates.\n"
+        "=== Locomotion stats ===\n"
+        "             base_speed  base_turn(rad/s)  lift\n"
+        "  wheels       5.0          10               2.5  (balanced)\n"
+        "  tracks       2.5          12               4.5  (slow but huge lift; pivots fast)\n"
+        "  4legs        4.0           7               3.0  (steady)\n"
+        "  2legs        6.0           5               1.5  (fast but fragile, low lift)\n"
+        "\n"
+        "=== Body stats ===\n"
+        "            max_hp  weight  shape (sx,sy,sz)\n"
+        "  cube        150    1.0    (1.0, 1.0, 1.0)\n"
+        "  tall        130    0.9    (0.7, 1.6, 0.7)\n"
+        "  flat        170    1.4    (1.6, 0.4, 1.6)\n"
+        "  long_low    140    1.0    (0.8, 0.4, 1.6)\n"
+        "  tower       120    0.8    (0.6, 2.0, 0.6)\n"
+        "  wedge       160    1.1    (1.2, 0.7, 1.4)\n"
+        "  tank        230    2.0    (1.4, 1.0, 1.4)\n"
+        "\n"
+        "=== Weight model ===\n"
+        "total_w = body.weight + sum(weapon.weight)\n"
+        "factor  = locomotion.lift / (locomotion.lift + total_w)\n"
+        "max_speed = locomotion.base_speed * factor\n"
+        "turn_rate = locomotion.base_turn  * factor\n"
+        "More/heavier weapons make the bot slower in BOTH translation and rotation.\n"
+        "Pick locomotion + body + weapon mix to fit your strategy.\n"
         "\n"
         "=== Arena & physics ===\n"
         "Arena is a rectangle centred on (0,0) with hard border walls.\n"
         "Movement is forward only along body heading; turning is rate-limited.\n"
         "fire() aims the turret toward the given direction but turret also turns rate-limited,\n"
         "so the actual shot direction is the CURRENT turret angle, not the requested angle.\n"
-        "Projectiles come from the two weapon mounts on either side of the body.\n"
+        "Projectiles spawn at each weapon's mount point on the turret.\n"
         "\n"
         "=== Lua 5.4 quirks you keep getting wrong ===\n"
         "1. math.atan2 does NOT exist. Use math.atan(y, x).\n"
@@ -483,9 +653,35 @@ static void build_system_prompt(char *dst, int dst_size) {
         "     GOOD: local targets = scan(0)\n"
         "6. Lua has no continue keyword. Use `goto continue` with a label, or nest an if.\n"
         "\n"
+        "=== Examples / cookbook block ===\n"
+        "The current script ends with a long comment block titled\n"
+        "  '-- EXAMPLES / COOKBOOK ...'\n"
+        "containing reference patterns (init shape, wall_avoid, nearest_enemy,\n"
+        "fire patterns, range-tiered fire_weapon, common pitfalls). PRESERVE\n"
+        "that whole comment block VERBATIM at the bottom of your output. It is\n"
+        "the working set of patterns for the next iteration; deleting it costs\n"
+        "you context on the next regeneration. Use those examples as the\n"
+        "scaffolding for init()/think(); do not invent new untested patterns.\n"
+        "\n"
+        "=== Smoke-test combat check (this is what we validate post-generation) ===\n"
+        "After generation we run the script in an isolated Lua state with stub\n"
+        "move/fire/fire_weapon/scan, simulate 3.0 seconds (60 frames at dt=0.05s),\n"
+        "and place 4 enemies at distance ~3.5u in the four cardinal directions\n"
+        "(front +x, back -x, left +z, right -z) moving tangentially at varied\n"
+        "speeds. self_hp is full for the first 1.5s and 10%% for the second 1.5s.\n"
+        "The script PASSES only if at least ONE fire/fire_weapon call is aimed\n"
+        "within 30 degrees of any enemy. To pass with zero ambiguity:\n"
+        "  - in think(), call scan(0)\n"
+        "  - find any entry where t.type=='bot' and t.team ~= self_team\n"
+        "  - call fire(t.x - self_x, t.z - self_z) every frame an enemy is in range\n"
+        "Also: the smoke test loads the file BEFORE setting any self_* globals,\n"
+        "so any file-scope code that reads self_x / self_z / self_team / self_hp\n"
+        "will fail load. Keep file-scope work seedless or use os.time().\n"
+        "\n"
         "=== Output format ===\n"
         "Return ONLY the Lua script. No markdown fences, no commentary, no reasoning prose.\n"
-        "The script must define init() returning a table, and think(dt).\n");
+        "The script must define init() returning a table, and think(dt).\n"
+        "Keep the EXAMPLES / COOKBOOK comment block at the bottom verbatim.\n");
 }
 
 typedef struct {

@@ -1,19 +1,25 @@
--- bot_lancer.lua — AutoCannon + Laser, heavy armour.
--- HP=250, speed=0.8. Holds position and burns enemies with the laser
--- while the cannon delivers heavy blows. Fires in movement direction on patrol.
+-- bot_lancer.lua — Wheeled artillery skirmisher.
+-- Build: wheels + tall body + 3 weapons:
+--   AutoCannon (left), Laser (right), Laser (top_front).
+-- Uses fire_weapon() to switch weapons per range:
+--   long range (>20 u): both lasers (top_front + right) only — fast, accurate;
+--   medium range:       all three weapons;
+--   short range (<6 u): drops the top laser, uses cannon + side laser.
 
 function init()
     return {
-        left_weapon  = "AutoCannon",
-        right_weapon = "Laser",
-        armour       = 3
+        locomotion = "wheels",
+        body       = "tall",
+        weapons = {
+            { type = "AutoCannon", mount = "left"      },
+            { type = "Laser",      mount = "right"     },
+            { type = "Laser",      mount = "top_front" },
+        },
     }
 end
 
 math.randomseed()
 
-local cannon_cd    = math.random() * 0.25
-local laser_cd     = math.random() * 0.05
 local wander_angle = math.random() * math.pi * 2
 local wander_timer = 0.0
 
@@ -32,11 +38,9 @@ local function wall_avoid(targets)
 end
 
 function think(dt)
-    cannon_cd    = cannon_cd    - dt
-    laser_cd     = laser_cd     - dt
     wander_timer = wander_timer - dt
 
-    local targets = scan(20.0)
+    local targets = scan(25.0)
     local ax, az  = wall_avoid(targets)
 
     local enemy, min_dist = nil, math.huge
@@ -50,12 +54,24 @@ function think(dt)
     if enemy then
         local dx = enemy.x - self_x
         local dz = enemy.z - self_z
-        local mx = dx + ax
-        local mz = dz + az
+        local mx, mz
+        if enemy.distance < 5.0 then
+            mx = -dx + ax;  mz = -dz + az  -- back away from melee
+        elseif enemy.distance > 16.0 then
+            mx =  dx + ax;  mz =  dz + az  -- close gap toward sniping range
+        else
+            mx =  ax;       mz =  az
+        end
         move(mx, mz)
-        if enemy.distance < 15.0 and laser_cd <= 0.0 then
-            fire(dx, dz)
-            laser_cd = 0.05
+
+        if enemy.distance > 20.0 then
+            fire_weapon(2, dx, dz)  -- right laser
+            fire_weapon(3, dx, dz)  -- top_front laser
+        elseif enemy.distance < 6.0 then
+            fire_weapon(1, dx, dz)  -- AutoCannon
+            fire_weapon(2, dx, dz)  -- right laser
+        else
+            fire(dx, dz)            -- everything
         end
     else
         local al = math.sqrt(ax * ax + az * az)

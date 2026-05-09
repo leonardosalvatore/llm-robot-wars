@@ -1,18 +1,25 @@
--- bot_fortress.lua — Double Laser, maximum armour.
--- HP=250, speed=0.8. Almost immobile; wins by continuous beam damage.
--- Sweeps lasers in movement direction while patrolling; steers around walls.
+-- bot_fortress.lua — Tracked laser fortress.
+-- Build: tracks + tank body + 4 weapons (the maximum):
+--   Laser (left), Laser (right), Laser (top), AutoCannon (top_rear).
+-- The heaviest chassis. Almost immobile but pivots fast on its tracks.
+-- Wins by continuous beam damage from three lasers; the rear AutoCannon
+-- punishes anything that gets behind it.
 
 function init()
     return {
-        left_weapon  = "Laser",
-        right_weapon = "Laser",
-        armour       = 3
+        locomotion = "tracks",
+        body       = "tank",
+        weapons = {
+            { type = "Laser",      mount = "left"     },
+            { type = "Laser",      mount = "right"    },
+            { type = "Laser",      mount = "top"      },
+            { type = "AutoCannon", mount = "top_rear" },
+        },
     }
 end
 
 math.randomseed()
 
-local fire_cd      = math.random() * 0.05
 local wander_angle = math.random() * math.pi * 2
 local wander_timer = 0.0
 
@@ -31,10 +38,9 @@ local function wall_avoid(targets)
 end
 
 function think(dt)
-    fire_cd      = fire_cd      - dt
     wander_timer = wander_timer - dt
 
-    local targets = scan(25.0)
+    local targets = scan(28.0)
     local ax, az  = wall_avoid(targets)
 
     local enemy, min_dist = nil, math.huge
@@ -51,18 +57,23 @@ function think(dt)
         local mx = dx + ax
         local mz = dz + az
         move(mx, mz)
-        if fire_cd <= 0.0 then
-            fire(dx, dz)
-            fire_cd = 0.05
+        -- All three lasers stay locked on; the AutoCannon (slot 4) only
+        -- fires when the target is well in range, since its 0.6s reload
+        -- otherwise wastes shots.
+        fire_weapon(1, dx, dz)
+        fire_weapon(2, dx, dz)
+        fire_weapon(3, dx, dz)
+        if enemy.distance < 14.0 then
+            fire_weapon(4, dx, dz)
         end
     else
         local al = math.sqrt(ax * ax + az * az)
         if al > 0.4 then
             wander_angle = math.atan(az, ax) + (math.random() - 0.5) * 0.5
-            wander_timer = 0.6
+            wander_timer = 0.8
         elseif wander_timer <= 0.0 then
             wander_angle = math.random() * math.pi * 2
-            wander_timer = 1.5 + math.random()
+            wander_timer = 1.8 + math.random()
         end
         local wx = math.cos(wander_angle) + ax
         local wz = math.sin(wander_angle) + az

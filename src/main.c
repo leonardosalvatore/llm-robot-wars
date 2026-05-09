@@ -87,6 +87,7 @@ static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
 static const int   DEFAULT_MATCH_DURATION       = 50;
 static const int   DEFAULT_NUM_MATCHES          = 10;
+static const int   BOT_COUNT_MAX                = 200;
 
 static float randf(float lo, float hi) {
     return lo + (float)rand() / (float)RAND_MAX * (hi - lo);
@@ -243,13 +244,13 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "bot_increment_per_match = %.2f # percent per match, 1=+1%%, 100=+100%%\n",
             (double)cfg->bot_increment_per_match);
     fprintf(f, "\n");
-    fprintf(f, "bot_light        = %-4d # 0-60\n", cfg->bots_per_type[0]);
-    fprintf(f, "bot_skirmisher   = %-4d # 0-60\n", cfg->bots_per_type[1]);
-    fprintf(f, "bot_chaser       = %-4d # 0-60\n", cfg->bots_per_type[2]);
-    fprintf(f, "bot_duelist      = %-4d # 0-60\n", cfg->bots_per_type[3]);
-    fprintf(f, "bot_lancer       = %-4d # 0-60\n", cfg->bots_per_type[4]);
-    fprintf(f, "bot_fortress     = %-4d # 0-60\n", cfg->bots_per_type[5]);
-    fprintf(f, "bot_llm          = %-4d # 0-60\n", cfg->bots_per_type[6]);
+    fprintf(f, "bot_light        = %-4d # 0-%d\n", cfg->bots_per_type[0], BOT_COUNT_MAX);
+    fprintf(f, "bot_skirmisher   = %-4d # 0-%d\n", cfg->bots_per_type[1], BOT_COUNT_MAX);
+    fprintf(f, "bot_chaser       = %-4d # 0-%d\n", cfg->bots_per_type[2], BOT_COUNT_MAX);
+    fprintf(f, "bot_duelist      = %-4d # 0-%d\n", cfg->bots_per_type[3], BOT_COUNT_MAX);
+    fprintf(f, "bot_lancer       = %-4d # 0-%d\n", cfg->bots_per_type[4], BOT_COUNT_MAX);
+    fprintf(f, "bot_fortress     = %-4d # 0-%d\n", cfg->bots_per_type[5], BOT_COUNT_MAX);
+    fprintf(f, "bot_llm          = %-4d # 0-%d\n", cfg->bots_per_type[6], BOT_COUNT_MAX);
     fprintf(f, "\n");
     fprintf(f, "llm_host         = %s\n", cfg->llm_host);
     fprintf(f, "llm_port         = %-4d # 1-65535\n", cfg->llm_port);
@@ -357,6 +358,63 @@ static void orbit_camera_around_target(Camera3D *camera, float yaw_delta, float 
     };
     camera->position = Vector3Add(camera->target, next);
     camera->up = (Vector3){0.0f, 1.0f, 0.0f};
+}
+
+static float wall_top_y(void) {
+    float top = 0.0f;
+    int wn = walls_count();
+    const Wall *wv = walls_get();
+    for (int i = 0; i < wn; i++) {
+        if (wv[i].height > top) top = wv[i].height;
+    }
+    return top;
+}
+
+static void clamp_camera_min_y(Camera3D *camera, float min_y) {
+    float lowest = camera->position.y < camera->target.y
+                 ? camera->position.y
+                 : camera->target.y;
+    if (lowest >= min_y) return;
+
+    float lift = min_y - lowest;
+    camera->position.y += lift;
+    camera->target.y   += lift;
+}
+
+static void camera_ground_basis(const Camera3D *camera, Vector3 *forward, Vector3 *right) {
+    Vector3 fwd = Vector3Subtract(camera->target, camera->position);
+    fwd.y = 0.0f;
+    if (Vector3Length(fwd) < 0.001f) {
+        fwd = (Vector3){0.0f, 0.0f, -1.0f};
+    } else {
+        fwd = Vector3Normalize(fwd);
+    }
+
+    Vector3 rgt = Vector3CrossProduct(fwd, (Vector3){0.0f, 1.0f, 0.0f});
+    if (Vector3Length(rgt) < 0.001f) {
+        rgt = (Vector3){1.0f, 0.0f, 0.0f};
+    } else {
+        rgt = Vector3Normalize(rgt);
+    }
+
+    if (forward) *forward = fwd;
+    if (right)   *right   = rgt;
+}
+
+static float camera_ground_yaw_deg(const Camera3D *camera) {
+    Vector3 right;
+    camera_ground_basis(camera, NULL, &right);
+    return atan2f(-right.z, right.x) * RAD2DEG_F;
+}
+
+static Texture2D default_billboard_texture(void) {
+    return (Texture2D){
+        .id      = rlGetTextureIdDefault(),
+        .width   = 1,
+        .height  = 1,
+        .mipmaps = 1,
+        .format  = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
 }
 
 /* ----------------------------------------------------------------------- */
@@ -655,9 +713,9 @@ static bool show_config_screen(GameConfig *cfg) {
                      script_labels[s]);
             Rectangle r = {(float)CTL_X, (float)ROW_Y,
                            (float)CTL_W, (float)(ROW_H - 4)};
-            if (GuiSpinner(r, NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 6]))
+            if (GuiSpinner(r, NULL, &cfg->bots_per_type[s], 0, BOT_COUNT_MAX, edit[s + 6]))
                 edit[s + 6] = !edit[s + 6];
-            spinner_enhance(r, &cfg->bots_per_type[s], 0, 60);
+            spinner_enhance(r, &cfg->bots_per_type[s], 0, BOT_COUNT_MAX);
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
@@ -822,58 +880,172 @@ static void draw_wall_tapered_wires(float cx, float cy, float cz,
 }
 
 /* ----------------------------------------------------------------------- */
-static void draw_weapon_local(WeaponType wt, float side_x, Color col) {
-    float ww, wh, wd;
+static void weapon_dims(WeaponType wt, float *ww, float *wh, float *wd) {
     if (wt == WEAPON_MACHINE_GUN) {
-        ww = CUBE_SIZE * 0.20f; wh = CUBE_SIZE * 0.15f; wd = CUBE_SIZE * 0.60f;
+        *ww = CUBE_SIZE * 0.20f; *wh = CUBE_SIZE * 0.15f; *wd = CUBE_SIZE * 0.60f;
     } else if (wt == WEAPON_AUTO_CANNON) {
-        ww = CUBE_SIZE * 0.25f; wh = CUBE_SIZE * 0.25f; wd = CUBE_SIZE * 0.45f;
+        *ww = CUBE_SIZE * 0.25f; *wh = CUBE_SIZE * 0.25f; *wd = CUBE_SIZE * 0.45f;
     } else {
-        ww = CUBE_SIZE * 0.12f; wh = CUBE_SIZE * 0.12f; wd = CUBE_SIZE * 0.80f;
+        *ww = CUBE_SIZE * 0.12f; *wh = CUBE_SIZE * 0.12f; *wd = CUBE_SIZE * 0.80f;
     }
-    DrawCube((Vector3){side_x, 0, wd * 0.1f}, ww, wh, wd, col);
-    DrawCubeWires((Vector3){side_x, 0, wd * 0.1f}, ww, wh, wd, BLACK);
+}
+
+/* Draw a weapon centred at (cx, cy, cz) in the current local frame.
+ * Barrel points along local +z (forward). */
+static void draw_weapon_at(WeaponType wt, float cx, float cy, float cz, Color col) {
+    float ww, wh, wd;
+    weapon_dims(wt, &ww, &wh, &wd);
+    Vector3 c = { cx, cy, cz + wd * 0.1f };
+    DrawCube(c, ww, wh, wd, col);
+    DrawCubeWires(c, ww, wh, wd, BLACK);
+}
+
+/* Returns the locomotion's vertical "deck" height at which the body sits. */
+static float locomotion_deck_h(Locomotion l) {
+    switch (l) {
+        case LOCO_TRACKS: return CUBE_SIZE * 0.5f;
+        case LOCO_WHEELS: return CUBE_SIZE * 0.5f;
+        case LOCO_LEGS_4: return CUBE_SIZE * 0.7f;
+        case LOCO_LEGS_2: return CUBE_SIZE * 0.7f;
+        default:          return CUBE_SIZE * 0.5f;
+    }
+}
+
+/* Top-of-body world Y, used for HP/armour bar placement. */
+static float bot_body_top_y(const BotConfig *cfg) {
+    return locomotion_deck_h(cfg->locomotion) + CUBE_SIZE * cfg->body_sy;
+}
+
+static void draw_locomotion(const BotConfig *cfg, const BotInertia *iner) {
+    Color trk_col = g_colors.bot_tread;
+    float bs   = CUBE_SIZE;
+    float bx   = bs * cfg->body_sx;
+    float bz   = bs * cfg->body_sz;
+    float deck = locomotion_deck_h(cfg->locomotion);
+
+    switch (cfg->locomotion) {
+        case LOCO_TRACKS: {
+            float trk_sx = bx * 1.05f;
+            float trk_sz = bz * 1.10f;
+            float trk_h  = deck;
+            DrawCube((Vector3){0, trk_h * 0.5f, 0}, trk_sx, trk_h, trk_sz, trk_col);
+            DrawCubeWires((Vector3){0, trk_h * 0.5f, 0}, trk_sx, trk_h, trk_sz, BLACK);
+            break;
+        }
+        case LOCO_WHEELS: {
+            float wh_r = deck * 0.5f;
+            float wh_w = bs * 0.18f;
+            float wh_y = wh_r;
+            float wxoff = bx * 0.5f + wh_w * 0.3f;
+            float wzoff = bz * 0.4f;
+            Vector3 wheels[4] = {
+                { -wxoff, wh_y, +wzoff },
+                { +wxoff, wh_y, +wzoff },
+                { -wxoff, wh_y, -wzoff },
+                { +wxoff, wh_y, -wzoff },
+            };
+            for (int i = 0; i < 4; i++) {
+                Vector3 a = { wheels[i].x - wh_w * 0.5f, wheels[i].y, wheels[i].z };
+                Vector3 b = { wheels[i].x + wh_w * 0.5f, wheels[i].y, wheels[i].z };
+                DrawCylinderEx(a, b, wh_r, wh_r, 12, trk_col);
+                DrawCylinderWiresEx(a, b, wh_r, wh_r, 12, BLACK);
+            }
+            break;
+        }
+        case LOCO_LEGS_4:
+        case LOCO_LEGS_2: {
+            int   n     = (cfg->locomotion == LOCO_LEGS_4) ? 4 : 2;
+            float leg_w = bs * 0.18f;
+            float leg_h = deck;
+            /* Swing in radians; ~14 deg amplitude. */
+            float swing = sinf(iner->move_anim_t * 6.0f) * 0.25f;
+
+            for (int i = 0; i < n; i++) {
+                float lx, lz, my_swing;
+                if (n == 4) {
+                    bool front = (i < 2);
+                    bool right = ((i % 2) == 1);
+                    lx = right ? +bx * 0.4f : -bx * 0.4f;
+                    lz = front ? +bz * 0.4f : -bz * 0.4f;
+                    /* Diagonal pairs swing together. */
+                    my_swing = (front == right) ? swing : -swing;
+                } else {
+                    lx = (i == 0) ? -bx * 0.4f : +bx * 0.4f;
+                    lz = 0.0f;
+                    my_swing = (i == 0) ? swing : -swing;
+                }
+                rlPushMatrix();
+                    /* Pivot at the top of the leg (where it meets the body). */
+                    rlTranslatef(lx, leg_h, lz);
+                    /* Swing forward/back: rotation around lateral (x) axis. */
+                    rlRotatef(my_swing * RAD2DEG_F, 1.0f, 0.0f, 0.0f);
+                    DrawCube((Vector3){0, -leg_h * 0.5f, 0}, leg_w, leg_h, leg_w, trk_col);
+                    DrawCubeWires((Vector3){0, -leg_h * 0.5f, 0}, leg_w, leg_h, leg_w, BLACK);
+                rlPopMatrix();
+            }
+            break;
+        }
+    }
 }
 
 static void draw_bot(float cx, float cz, Color color,
-                     const BotConfig *cfg,
-                     float body_angle, float turret_angle)
+                     const BotConfig *cfg, const BotInertia *iner)
 {
-    float bs    = CUBE_SIZE * cfg->body_scale;
-    float trk_h = bs * 0.5f;
-    float trk_y = trk_h * 0.5f;
-    float bod_y = trk_h + bs * 0.5f;
-    float trk_sz = bs * 2.0f;
+    float bs   = CUBE_SIZE;
+    float bx   = bs * cfg->body_sx;
+    float by   = bs * cfg->body_sy;
+    float bz   = bs * cfg->body_sz;
+    float deck = locomotion_deck_h(cfg->locomotion);
+    float bod_y = deck + by * 0.5f;
 
-    float body_deg = 90.0f - body_angle * RAD2DEG_F;
+    float body_deg = 90.0f - iner->body_angle * RAD2DEG_F;
     rlPushMatrix();
         rlTranslatef(cx, 0.0f, cz);
         rlRotatef(body_deg, 0.0f, 1.0f, 0.0f);
 
-        Color trk_col = g_colors.bot_tread;
-        DrawCube((Vector3){0, trk_y, 0}, trk_sz, trk_h, trk_sz, trk_col);
-        DrawCubeWires((Vector3){0, trk_y, 0}, trk_sz, trk_h, trk_sz, BLACK);
+        draw_locomotion(cfg, iner);
 
-        DrawCube((Vector3){0, bod_y, 0}, bs, bs, bs, color);
-        DrawCubeWires((Vector3){0, bod_y, 0}, bs, bs, bs, BLACK);
+        DrawCube((Vector3){0, bod_y, 0}, bx, by, bz, color);
+        DrawCubeWires((Vector3){0, bod_y, 0}, bx, by, bz, BLACK);
     rlPopMatrix();
 
-    float turret_deg = 90.0f - turret_angle * RAD2DEG_F;
-    float half = bs * 0.5f;
-
-    float lw = (cfg->left_weapon  == WEAPON_MACHINE_GUN) ? CUBE_SIZE * 0.20f :
-               (cfg->left_weapon  == WEAPON_AUTO_CANNON)  ? CUBE_SIZE * 0.25f :
-                                                             CUBE_SIZE * 0.50f;
-    float rw = (cfg->right_weapon == WEAPON_MACHINE_GUN) ? CUBE_SIZE * 0.20f :
-               (cfg->right_weapon == WEAPON_AUTO_CANNON)  ? CUBE_SIZE * 0.25f :
-                                                             CUBE_SIZE * 0.50f;
-
+    /* Turret (carries weapons; rotates independently of body). */
+    float turret_deg = 90.0f - iner->turret_angle * RAD2DEG_F;
     Color wcolor = g_colors.bot_weapon;
+
     rlPushMatrix();
         rlTranslatef(cx, bod_y, cz);
         rlRotatef(turret_deg, 0.0f, 1.0f, 0.0f);
-        draw_weapon_local(cfg->left_weapon,  -(half + lw * 0.5f + 0.02f), wcolor);
-        draw_weapon_local(cfg->right_weapon, +(half + rw * 0.5f + 0.02f), wcolor);
+
+        for (int i = 0; i < cfg->weapon_count; i++) {
+            const WeaponSlot *ws = &cfg->weapons[i];
+            float ww, wh, wd;
+            weapon_dims(ws->type, &ww, &wh, &wd);
+
+            float half_x = bx * 0.5f;
+            float half_z = bz * 0.5f;
+            float top_y  = by * 0.5f;
+            float mx = 0.0f, my = 0.0f, mz = 0.0f;
+
+            switch (ws->mount) {
+                case MOUNT_LEFT:
+                    mx = -(half_x + ww * 0.5f + 0.02f); my = 0.0f; mz = 0.0f;
+                    break;
+                case MOUNT_RIGHT:
+                    mx = +(half_x + ww * 0.5f + 0.02f); my = 0.0f; mz = 0.0f;
+                    break;
+                case MOUNT_TOP:
+                    mx = 0.0f;                          my = top_y + wh * 0.6f; mz = 0.0f;
+                    break;
+                case MOUNT_TOP_FRONT:
+                    mx = 0.0f;                          my = top_y + wh * 0.6f; mz = +half_z * 0.6f;
+                    break;
+                case MOUNT_TOP_REAR:
+                    mx = 0.0f;                          my = top_y + wh * 0.6f; mz = -half_z * 0.6f;
+                    break;
+            }
+            draw_weapon_at(ws->type, mx, my, mz, wcolor);
+        }
     rlPopMatrix();
 }
 
@@ -912,12 +1084,21 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
         if (L) {
             scripting_call_init(L, &cfg);
         } else {
-            cfg.left_weapon  = WEAPON_AUTO_CANNON;
-            cfg.right_weapon = WEAPON_AUTO_CANNON;
-            cfg.armour       = 0;
-            cfg.max_hp       = 100.0f;
-            cfg.max_speed    = 5.0f;
-            cfg.body_scale   = 1.0f;
+            memset(&cfg, 0, sizeof(cfg));
+            cfg.locomotion       = LOCO_WHEELS;
+            cfg.body             = BODY_CUBE;
+            cfg.weapon_count     = 2;
+            cfg.weapons[0].type  = WEAPON_AUTO_CANNON;
+            cfg.weapons[0].mount = MOUNT_LEFT;
+            cfg.weapons[1].type  = WEAPON_AUTO_CANNON;
+            cfg.weapons[1].mount = MOUNT_RIGHT;
+            cfg.max_hp     = 150.0f;
+            cfg.max_speed  = 3.5f;
+            cfg.turn_rate  = 7.0f;
+            cfg.body_sx    = 1.0f;
+            cfg.body_sy    = 1.0f;
+            cfg.body_sz    = 1.0f;
+            cfg.total_weight = 2.8f;
         }
         cfg.script_idx = script_idx;
 
@@ -994,12 +1175,21 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
             if (L) {
                 scripting_call_init(L, &cfg);
             } else {
-                cfg.left_weapon  = WEAPON_AUTO_CANNON;
-                cfg.right_weapon = WEAPON_AUTO_CANNON;
-                cfg.armour       = 0;
-                cfg.max_hp       = 100.0f;
-                cfg.max_speed    = 5.0f;
-                cfg.body_scale   = 1.0f;
+                memset(&cfg, 0, sizeof(cfg));
+                cfg.locomotion       = LOCO_WHEELS;
+                cfg.body             = BODY_CUBE;
+                cfg.weapon_count     = 2;
+                cfg.weapons[0].type  = WEAPON_AUTO_CANNON;
+                cfg.weapons[0].mount = MOUNT_LEFT;
+                cfg.weapons[1].type  = WEAPON_AUTO_CANNON;
+                cfg.weapons[1].mount = MOUNT_RIGHT;
+                cfg.max_hp     = 150.0f;
+                cfg.max_speed  = 3.5f;
+                cfg.turn_rate  = 7.0f;
+                cfg.body_sx    = 1.0f;
+                cfg.body_sy    = 1.0f;
+                cfg.body_sz    = 1.0f;
+                cfg.total_weight = 2.8f;
             }
             cfg.script_idx = s;
 
@@ -1207,8 +1397,6 @@ int main(void) {
     config_set_defaults(&gcfg);
     config_load(&gcfg, CFG_PATH);
 
-    Vector3 pan_right   = Vector3Normalize((Vector3){1.0f, 0.0f, -1.0f});
-    Vector3 pan_forward = Vector3Normalize((Vector3){1.0f, 0.0f,  1.0f});
     bool show_scan_lines = false;
 
     /* ================================================================== */
@@ -1312,22 +1500,18 @@ int main(void) {
                 }
             } else {
                 /* Camera controls */
+                Vector3 pan_forward, pan_right;
+                camera_ground_basis(camera, &pan_forward, &pan_right);
                 Vector3 delta = {0};
                 if (IsKeyDown(KEY_D)) delta = Vector3Add(delta, Vector3Scale(pan_right,    CAM_SPEED * dt));
                 if (IsKeyDown(KEY_A)) delta = Vector3Add(delta, Vector3Scale(pan_right,   -CAM_SPEED * dt));
-                if (IsKeyDown(KEY_W)) delta = Vector3Add(delta, Vector3Scale(pan_forward, -CAM_SPEED * dt));
-                if (IsKeyDown(KEY_S)) delta = Vector3Add(delta, Vector3Scale(pan_forward,  CAM_SPEED * dt));
+                if (IsKeyDown(KEY_W)) delta = Vector3Add(delta, Vector3Scale(pan_forward,  CAM_SPEED * dt));
+                if (IsKeyDown(KEY_S)) delta = Vector3Add(delta, Vector3Scale(pan_forward, -CAM_SPEED * dt));
                 if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                     Vector2 md = GetMouseDelta();
-                    Vector3 view_dir = Vector3Subtract(camera->target, camera->position);
-                    view_dir.y = 0.0f;
-                    if (Vector3Length(view_dir) > 0.001f) {
-                        view_dir = Vector3Normalize(view_dir);
-                        Vector3 drag_right = Vector3Normalize(Vector3CrossProduct(view_dir, (Vector3){0.0f, 1.0f, 0.0f}));
-                        float drag_scale = Vector3Distance(camera->position, camera->target) * 0.0025f;
-                        delta = Vector3Add(delta, Vector3Scale(drag_right, -md.x * drag_scale));
-                        delta = Vector3Add(delta, Vector3Scale(view_dir,   -md.y * drag_scale));
-                    }
+                    float drag_scale = Vector3Distance(camera->position, camera->target) * 0.0025f;
+                    delta = Vector3Add(delta, Vector3Scale(pan_right,   -md.x * drag_scale));
+                    delta = Vector3Add(delta, Vector3Scale(pan_forward, -md.y * drag_scale));
                 }
                 camera->position = Vector3Add(camera->position, delta);
                 camera->target   = Vector3Add(camera->target,   delta);
@@ -1346,6 +1530,7 @@ int main(void) {
 
                 if (IsKeyDown(KEY_Z)) { camera->position.y += CAM_SPEED * dt; camera->target.y += CAM_SPEED * dt; }
                 if (IsKeyDown(KEY_X)) { camera->position.y -= CAM_SPEED * dt; camera->target.y -= CAM_SPEED * dt; }
+                clamp_camera_min_y(camera, wall_top_y());
 
                 if (IsKeyPressed(KEY_F))      ToggleFullscreen();
                 if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
@@ -1433,8 +1618,7 @@ int main(void) {
                         alive[b->config.script_idx]++;
 
                         Color col = {b->r, b->g, b->b, b->a};
-                        draw_bot(b->x, b->z, col, &b->config,
-                                 b->inertia.body_angle, b->inertia.turret_angle);
+                        draw_bot(b->x, b->z, col, &b->config, &b->inertia);
 
                         /* Scan lines (toggle with T) */
                         if (show_scan_lines) {
@@ -1451,8 +1635,9 @@ int main(void) {
                             }
                         }
 
-                        /* Energy bar */
-                        float bar_base_y = BAR_Y * b->config.body_scale;
+                        /* Energy bar — perched just above the body roof. */
+                        float bar_base_y = bot_body_top_y(&b->config) + CUBE_SIZE * 0.4f;
+                        float bar_yaw    = camera_ground_yaw_deg(camera);
                         float base_hp    = 100.0f;
                         float frac       = (b->hp < base_hp)
                                            ? (b->hp / base_hp) : 1.0f;
@@ -1463,7 +1648,7 @@ int main(void) {
                                                      : g_colors.hp_low;
                         rlPushMatrix();
                             rlTranslatef(b->x, bar_base_y, b->z);
-                            rlRotatef(45.0f, 0, 1, 0);
+                            rlRotatef(bar_yaw, 0, 1, 0);
                             DrawCube((Vector3){0,0,0}, BAR_W, BAR_H, BAR_D,
                                      g_colors.hp_bg);
                             if (fill_w > 0.0f)
@@ -1471,8 +1656,9 @@ int main(void) {
                                          fill_w, BAR_H, BAR_D, bar_col);
                         rlPopMatrix();
 
-                        /* Armour bar */
-                        if (b->config.armour > 0) {
+                        /* Armour bar — drawn whenever the body provides extra HP above the
+                         * 100-point baseline (was: only when the dropped armour field was set). */
+                        if (b->config.max_hp > base_hp) {
                             float armour_pool = b->config.max_hp - base_hp;
                             float armour_rem  = b->hp - base_hp;
                             if (armour_rem < 0.0f) armour_rem = 0.0f;
@@ -1483,7 +1669,7 @@ int main(void) {
                             float ay     = bar_base_y + BAR_H + ah * 0.5f + 0.01f;
                             rlPushMatrix();
                                 rlTranslatef(b->x, ay, b->z);
-                                rlRotatef(45.0f, 0, 1, 0);
+                                rlRotatef(bar_yaw, 0, 1, 0);
                                 DrawCube((Vector3){0,0,0}, BAR_W, ah, BAR_D,
                                          g_colors.armour_bg);
                                 if (afillw > 0.0f)
@@ -1501,16 +1687,19 @@ int main(void) {
                         float py = CUBE_SIZE * 0.3f;
                         if (p->weapon_type == WEAPON_LASER) {
                             float half = 0.80f;
+                            rlSetLineWidth(4.0f);
                             DrawLine3D(
                                 (Vector3){p->x - p->dir_x * half, py,
                                           p->z - p->dir_z * half},
                                 (Vector3){p->x + p->dir_x * half, py,
                                           p->z + p->dir_z * half},
                                 g_colors.laser);
+                            rlSetLineWidth(1.0f);
                         } else {
                             Color col = {p->r, p->g, p->b, p->a};
-                            DrawSphere((Vector3){p->x, py, p->z},
-                                       CUBE_SIZE * 0.18f, col);
+                            DrawBillboard(*camera, default_billboard_texture(),
+                                          (Vector3){p->x, py, p->z},
+                                          CUBE_SIZE * 0.36f, col);
                         }
                     }
 

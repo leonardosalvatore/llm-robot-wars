@@ -75,8 +75,13 @@ void update_set_arena(float half_x, float half_z) {
 
 /* ----------------------------------------------------------------------- */
 
-static const float BODY_TURN_RATE[4]   = { 10.0f, 6.0f, 3.5f, 2.0f };
-static const float TURRET_TURN_RATE[3] = {  8.0f, 4.0f, 2.0f };
+/* Per-weapon turret turn rates in rad/s.
+ * Mirrors WEAPON_STATS in scripting.c; kept local to avoid an extra header. */
+static const float WEAPON_TURRET_TURN[3] = {
+    [WEAPON_MACHINE_GUN] = 8.0f,
+    [WEAPON_AUTO_CANNON] = 4.0f,
+    [WEAPON_LASER]       = 2.0f,
+};
 
 static float angle_step(float current, float desired, float rate, float dt) {
     float diff = desired - current;
@@ -141,17 +146,19 @@ void update_inertia(Bot *bots, int count, float dt) {
         Bot *b = &bots[i];
         if (!b->active) continue;
 
-        int armour = b->config.armour;
-        if (armour < 0) armour = 0;
-        if (armour > 3) armour = 3;
-
-        float brate = BODY_TURN_RATE[armour];
         b->inertia.body_angle = angle_step(b->inertia.body_angle,
-                                           b->inertia.desired_body_angle, brate, dt);
+                                           b->inertia.desired_body_angle,
+                                           b->config.turn_rate, dt);
 
-        float trate_l = TURRET_TURN_RATE[(int)b->config.left_weapon];
-        float trate_r = TURRET_TURN_RATE[(int)b->config.right_weapon];
-        float trate   = (trate_l < trate_r) ? trate_l : trate_r;
+        /* Turret turn-rate is the slowest of all mounted weapons. */
+        float trate = 0.0f;
+        for (int w = 0; w < b->config.weapon_count; w++) {
+            int wt = (int)b->config.weapons[w].type;
+            if (wt < 0 || wt > 2) continue;
+            float tr = WEAPON_TURRET_TURN[wt];
+            if (trate == 0.0f || tr < trate) trate = tr;
+        }
+        if (trate <= 0.0f) trate = 4.0f;
         b->inertia.turret_angle = angle_step(b->inertia.turret_angle,
                                              b->inertia.desired_turret_angle, trate, dt);
 
@@ -164,8 +171,13 @@ void update_inertia(Bot *bots, int count, float dt) {
             b->vz = 0.0f;
         }
 
-        if (b->inertia.left_fire_cd  > 0.0f) b->inertia.left_fire_cd  -= dt;
-        if (b->inertia.right_fire_cd > 0.0f) b->inertia.right_fire_cd -= dt;
+        for (int w = 0; w < MAX_WEAPONS; w++) {
+            if (b->inertia.weapon_cd[w] > 0.0f) b->inertia.weapon_cd[w] -= dt;
+        }
+
+        /* Walk/wheel animation phase advanced by speed magnitude. */
+        float speed = sqrtf(b->vx * b->vx + b->vz * b->vz);
+        b->inertia.move_anim_t += speed * dt;
     }
 }
 
