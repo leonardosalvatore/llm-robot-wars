@@ -406,6 +406,16 @@ static float camera_ground_yaw_deg(const Camera3D *camera) {
     return atan2f(-right.z, right.x) * RAD2DEG_F;
 }
 
+static Texture2D default_billboard_texture(void) {
+    return (Texture2D){
+        .id      = rlGetTextureIdDefault(),
+        .width   = 1,
+        .height  = 1,
+        .mipmaps = 1,
+        .format  = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+}
+
 /* ----------------------------------------------------------------------- */
 /* spinner_enhance: run AFTER GuiSpinner() with the same bounds. Adds
  *  - mouse wheel over the spinner → ±10
@@ -1684,8 +1694,9 @@ int main(void) {
                                 g_colors.laser);
                         } else {
                             Color col = {p->r, p->g, p->b, p->a};
-                            DrawSphere((Vector3){p->x, py, p->z},
-                                       CUBE_SIZE * 0.18f, col);
+                            DrawBillboard(*camera, default_billboard_texture(),
+                                          (Vector3){p->x, py, p->z},
+                                          CUBE_SIZE * 0.36f, col);
                         }
                     }
 
