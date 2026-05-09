@@ -1,11 +1,16 @@
--- bot_skirmisher.lua — Mixed light: MachineGun left, AutoCannon right, light armour.
--- HP=150, speed=3.5. Peppers with MG then finishes with cannon; holds fire when blind.
+-- bot_skirmisher.lua — Asymmetric quadruped.
+-- Build: 4legs + wedge body + MachineGun (left) + AutoCannon (right).
+-- Peppers from medium range with the MG, finishes the job with the AC.
+-- Kites away when HP is low.
 
 function init()
     return {
-        left_weapon  = "MachineGun",
-        right_weapon = "AutoCannon",
-        armour       = 1
+        locomotion = "4legs",
+        body       = "wedge",
+        weapons = {
+            { type = "MachineGun", mount = "left"  },
+            { type = "AutoCannon", mount = "right" },
+        },
     }
 end
 
@@ -54,9 +59,9 @@ function think(dt)
             mx =  dx + ax;  mz =  dz + az
         end
         move(mx, mz)
-        if enemy.distance < 7.0 and fire_cd <= 0.0 then
+        if enemy.distance < 9.0 and fire_cd <= 0.0 then
             fire(dx, dz)
-            fire_cd = 0.25
+            fire_cd = 0.20
         end
     else
         local al = math.sqrt(ax * ax + az * az)

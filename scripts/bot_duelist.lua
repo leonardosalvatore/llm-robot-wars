@@ -1,12 +1,17 @@
--- bot_duelist.lua — Double AutoCannon, medium armour.
--- HP=200, speed=2.0. Advances slowly and hammers with two cannons.
--- Fires in movement direction while wandering; steers around walls.
+-- bot_duelist.lua — Triple-cannon walking turret.
+-- Build: 4legs + tower body + 3 AutoCannons (left, right, top).
+-- Tall, narrow profile is a small target. Holds ground at medium range and
+-- hammers the enemy with three synchronised cannons.
 
 function init()
     return {
-        left_weapon  = "AutoCannon",
-        right_weapon = "AutoCannon",
-        armour       = 2
+        locomotion = "4legs",
+        body       = "tower",
+        weapons = {
+            { type = "AutoCannon", mount = "left"  },
+            { type = "AutoCannon", mount = "right" },
+            { type = "AutoCannon", mount = "top"   },
+        },
     }
 end
 
@@ -49,15 +54,18 @@ function think(dt)
         local dx = enemy.x - self_x
         local dz = enemy.z - self_z
         local mx, mz
-        if self_hp < self_max_hp * 0.15 then
-            mx = -dx + ax;  mz = -dz + az
-        else
+        if enemy.distance < 5.0 then
+            -- Strafe / sidestep: keep the enemy near medium range
+            mx = -dz + ax;  mz =  dx + az
+        elseif enemy.distance > 10.0 then
             mx =  dx + ax;  mz =  dz + az
+        else
+            mx =  ax;       mz =  az
         end
         move(mx, mz)
-        if enemy.distance < 8.0 and fire_cd <= 0.0 then
+        if enemy.distance < 12.0 and fire_cd <= 0.0 then
             fire(dx, dz)
-            fire_cd = 0.25
+            fire_cd = 0.20
         end
     else
         local al = math.sqrt(ax * ax + az * az)

@@ -1,12 +1,15 @@
--- bot_random.lua
--- Wanders in random directions and fires both weapons indiscriminately.
--- Now steers away from walls detected by scan().
+-- bot_random.lua — Single-gun walker, drunken AI.
+-- Build: 2legs + cube body + 1x MachineGun mounted on top.
+-- Wanders in random directions and fires at random angles. Steers off walls
+-- only just enough to not get pinned.
 
 function init()
     return {
-        left_weapon  = "MachineGun",
-        right_weapon = "MachineGun",
-        armour       = 0
+        locomotion = "2legs",
+        body       = "cube",
+        weapons = {
+            { type = "MachineGun", mount = "top" },
+        },
     }
 end
 
@@ -16,7 +19,6 @@ local move_angle = math.random() * math.pi * 2
 local move_timer = 0.0
 local fire_timer = math.random() * 0.5
 
--- Returns (ax, az) repulsion vector from nearby walls.
 local function wall_avoid(targets)
     local ax, az = 0, 0
     for _, r in ipairs(targets) do
@@ -38,11 +40,9 @@ function think(dt)
         move_timer = 0.8 + math.random() * 1.5
     end
 
-    -- Short scan just for wall avoidance
     local targets = scan(2.5)
     local ax, az  = wall_avoid(targets)
 
-    -- If strong wall presence, redirect wander angle away
     local al = math.sqrt(ax * ax + az * az)
     if al > 0.4 then
         move_angle = math.atan(az, ax) + (math.random() - 0.5) * 0.6
@@ -57,6 +57,6 @@ function think(dt)
     if fire_timer <= 0.0 then
         local a = math.random() * math.pi * 2
         fire(math.cos(a), math.sin(a))
-        fire_timer = 0.08
+        fire_timer = 0.12
     end
 end

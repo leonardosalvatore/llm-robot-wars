@@ -1,11 +1,16 @@
--- bot_light.lua  — Fast scout: double MachineGun, no armour.
--- HP=100, speed=5.0. Kites and sprays at enemies; holds fire when blind.
+-- bot_light.lua  — Fast scout walker.
+-- Build: 2legs + long_low body + 2x MachineGun (left/right).
+-- The lowest-weight chassis: highest base speed, low HP. Kites at range and
+-- sprays both MGs; backs off when the enemy gets close.
 
 function init()
     return {
-        left_weapon  = "MachineGun",
-        right_weapon = "MachineGun",
-        armour       = 0
+        locomotion = "2legs",
+        body       = "long_low",
+        weapons = {
+            { type = "MachineGun", mount = "left"  },
+            { type = "MachineGun", mount = "right" },
+        },
     }
 end
 
@@ -59,7 +64,6 @@ function think(dt)
             fire_cd = 0.08
         end
     else
-        -- No target — wander, deflect from walls
         local al = math.sqrt(ax * ax + az * az)
         if al > 0.4 then
             wander_angle = math.atan(az, ax) + (math.random() - 0.5) * 0.5

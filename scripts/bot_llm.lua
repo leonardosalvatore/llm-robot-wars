@@ -1,10 +1,11 @@
--- bot_llm.lua — "light-quick": fast and agile bot using AutoCannon and MachineGun
+-- bot_llm.lua — "wall-bumper": wander in a fixed direction; whenever the
+-- bot stalls against a wall (or sees one very close) it picks a brand new
+-- random direction. Dual AutoCannon; fires only at the nearest visible enemy.
 
 function init()
     return {
-        left_weapon  = "MachineGun",
+        left_weapon  = "AutoCannon",
         right_weapon = "AutoCannon",
-        armour       = 2,
     }
 end
 
@@ -70,7 +71,7 @@ function think(dt)
 
     -- Fire ONLY when an enemy is visible. Engine caps AutoCannon at 0.6s, so
     -- calling fire() every tick is safe: excess shots are silently dropped.
-    if enemy and enemy_dist < 30 then
+    if enemy then
         fire(enemy.x - self_x, enemy.z - self_z)
     end
 end

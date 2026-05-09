@@ -1,12 +1,20 @@
--- bot_chaser.lua
--- Scans for nearest enemy, chases and fires at it. Retreats when HP is low.
--- Holds fire when no target in sight. Steers around walls.
+-- bot_chaser.lua — Quad-gun rover.
+-- Build: wheels + flat body + 4 weapons:
+--   MachineGun (left), MachineGun (right),
+--   AutoCannon (top_front), AutoCannon (top_rear).
+-- A wide, low chassis with rapid-fire MGs and two heavy cannons. Charges
+-- enemies and unloads everything. Retreats only on critical HP.
 
 function init()
     return {
-        left_weapon  = "AutoCannon",
-        right_weapon = "AutoCannon",
-        armour       = 1
+        locomotion = "wheels",
+        body       = "flat",
+        weapons = {
+            { type = "MachineGun", mount = "left"      },
+            { type = "MachineGun", mount = "right"     },
+            { type = "AutoCannon", mount = "top_front" },
+            { type = "AutoCannon", mount = "top_rear"  },
+        },
     }
 end
 
@@ -34,7 +42,7 @@ function think(dt)
     fire_cooldown = fire_cooldown - dt
     wander_timer  = wander_timer  - dt
 
-    local targets = scan(12.0)
+    local targets = scan(14.0)
     local ax, az  = wall_avoid(targets)
 
     local enemy, min_dist = nil, math.huge
@@ -49,15 +57,15 @@ function think(dt)
         local dx = enemy.x - self_x
         local dz = enemy.z - self_z
         local mx, mz
-        if self_hp < self_max_hp * 0.3 then
+        if self_hp < self_max_hp * 0.2 then
             mx = -dx + ax;  mz = -dz + az
         else
             mx =  dx + ax;  mz =  dz + az
         end
         move(mx, mz)
-        if enemy.distance < 6.0 and fire_cooldown <= 0.0 then
+        if enemy.distance < 8.0 and fire_cooldown <= 0.0 then
             fire(dx, dz)
-            fire_cooldown = 0.25
+            fire_cooldown = 0.15
         end
     else
         local al = math.sqrt(ax * ax + az * az)
