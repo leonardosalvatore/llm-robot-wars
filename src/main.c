@@ -87,6 +87,7 @@ static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
 static const int   DEFAULT_MATCH_DURATION       = 50;
 static const int   DEFAULT_NUM_MATCHES          = 10;
+static const int   BOT_COUNT_MAX                = 200;
 
 static float randf(float lo, float hi) {
     return lo + (float)rand() / (float)RAND_MAX * (hi - lo);
@@ -243,13 +244,13 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "bot_increment_per_match = %.2f # percent per match, 1=+1%%, 100=+100%%\n",
             (double)cfg->bot_increment_per_match);
     fprintf(f, "\n");
-    fprintf(f, "bot_light        = %-4d # 0-60\n", cfg->bots_per_type[0]);
-    fprintf(f, "bot_skirmisher   = %-4d # 0-60\n", cfg->bots_per_type[1]);
-    fprintf(f, "bot_chaser       = %-4d # 0-60\n", cfg->bots_per_type[2]);
-    fprintf(f, "bot_duelist      = %-4d # 0-60\n", cfg->bots_per_type[3]);
-    fprintf(f, "bot_lancer       = %-4d # 0-60\n", cfg->bots_per_type[4]);
-    fprintf(f, "bot_fortress     = %-4d # 0-60\n", cfg->bots_per_type[5]);
-    fprintf(f, "bot_llm          = %-4d # 0-60\n", cfg->bots_per_type[6]);
+    fprintf(f, "bot_light        = %-4d # 0-%d\n", cfg->bots_per_type[0], BOT_COUNT_MAX);
+    fprintf(f, "bot_skirmisher   = %-4d # 0-%d\n", cfg->bots_per_type[1], BOT_COUNT_MAX);
+    fprintf(f, "bot_chaser       = %-4d # 0-%d\n", cfg->bots_per_type[2], BOT_COUNT_MAX);
+    fprintf(f, "bot_duelist      = %-4d # 0-%d\n", cfg->bots_per_type[3], BOT_COUNT_MAX);
+    fprintf(f, "bot_lancer       = %-4d # 0-%d\n", cfg->bots_per_type[4], BOT_COUNT_MAX);
+    fprintf(f, "bot_fortress     = %-4d # 0-%d\n", cfg->bots_per_type[5], BOT_COUNT_MAX);
+    fprintf(f, "bot_llm          = %-4d # 0-%d\n", cfg->bots_per_type[6], BOT_COUNT_MAX);
     fprintf(f, "\n");
     fprintf(f, "llm_host         = %s\n", cfg->llm_host);
     fprintf(f, "llm_port         = %-4d # 1-65535\n", cfg->llm_port);
@@ -712,9 +713,9 @@ static bool show_config_screen(GameConfig *cfg) {
                      script_labels[s]);
             Rectangle r = {(float)CTL_X, (float)ROW_Y,
                            (float)CTL_W, (float)(ROW_H - 4)};
-            if (GuiSpinner(r, NULL, &cfg->bots_per_type[s], 0, 60, edit[s + 6]))
+            if (GuiSpinner(r, NULL, &cfg->bots_per_type[s], 0, BOT_COUNT_MAX, edit[s + 6]))
                 edit[s + 6] = !edit[s + 6];
-            spinner_enhance(r, &cfg->bots_per_type[s], 0, 60);
+            spinner_enhance(r, &cfg->bots_per_type[s], 0, BOT_COUNT_MAX);
 
             if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
                 if (!CheckCollisionPointRec(GetMousePosition(), r))
@@ -1686,12 +1687,14 @@ int main(void) {
                         float py = CUBE_SIZE * 0.3f;
                         if (p->weapon_type == WEAPON_LASER) {
                             float half = 0.80f;
+                            rlSetLineWidth(4.0f);
                             DrawLine3D(
                                 (Vector3){p->x - p->dir_x * half, py,
                                           p->z - p->dir_z * half},
                                 (Vector3){p->x + p->dir_x * half, py,
                                           p->z + p->dir_z * half},
                                 g_colors.laser);
+                            rlSetLineWidth(1.0f);
                         } else {
                             Color col = {p->r, p->g, p->b, p->a};
                             DrawBillboard(*camera, default_billboard_texture(),
