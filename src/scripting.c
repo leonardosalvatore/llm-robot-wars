@@ -4,18 +4,19 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-static char g_last_error[512] = {0};
-
-/* ----------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ * Weapon / locomotion / body tables — same values as before.
+ * ------------------------------------------------------------------------- */
 typedef struct {
     float damage;
     float speed;
     float lifetime;
-    float fire_interval;   /* minimum seconds between two shots from this weapon */
-    float weight;          /* contributes to total weight */
-    float turret_turn;     /* rad/s — slowest weapon limits turret turn rate */
+    float fire_interval;
+    float weight;
+    float turret_turn;
 } WeaponStats;
 
 static const WeaponStats WEAPON_STATS[3] = {
@@ -29,11 +30,10 @@ float scripting_weapon_fire_interval(WeaponType t) {
     return WEAPON_STATS[t].fire_interval;
 }
 
-/* ----------------------------------------------------------------------- */
 typedef struct {
-    float base_speed;   /* units/s before weight factor */
-    float base_turn;    /* rad/s before weight factor */
-    float lift;         /* lift capacity; higher = less affected by weight */
+    float base_speed;
+    float base_turn;
+    float lift;
 } LocomotionStats;
 
 static const LocomotionStats LOCO_STATS[4] = {
@@ -44,7 +44,7 @@ static const LocomotionStats LOCO_STATS[4] = {
 };
 
 typedef struct {
-    float sx, sy, sz;   /* scale relative to CUBE_SIZE */
+    float sx, sy, sz;
     float hp;
     float weight;
 } BodyStats;
@@ -59,12 +59,14 @@ static const BodyStats BODY_STATS[7] = {
     [BODY_TANK]     = { .sx = 1.4f, .sy = 1.0f, .sz = 1.4f, .hp = 230.0f, .weight = 2.0f },
 };
 
-/* ----------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ * String helpers
+ * ------------------------------------------------------------------------- */
 static WeaponType parse_weapon(const char *name) {
     if (!name) return WEAPON_AUTO_CANNON;
-    if (strcmp(name, "MachineGun")  == 0) return WEAPON_MACHINE_GUN;
-    if (strcmp(name, "AutoCannon")  == 0) return WEAPON_AUTO_CANNON;
-    if (strcmp(name, "Laser")       == 0) return WEAPON_LASER;
+    if (strcmp(name, "MachineGun") == 0) return WEAPON_MACHINE_GUN;
+    if (strcmp(name, "AutoCannon") == 0) return WEAPON_AUTO_CANNON;
+    if (strcmp(name, "Laser")      == 0) return WEAPON_LASER;
     fprintf(stderr, "[script] Unknown weapon '%s', defaulting to AutoCannon\n", name);
     return WEAPON_AUTO_CANNON;
 }
@@ -135,10 +137,9 @@ static WeaponMount parse_mount(const char *name) {
     return MOUNT_LEFT;
 }
 
-/* ----------------------------------------------------------------------- */
-/* Compute mount offset in body-local turret coordinates.
- * Forward (turret-aim direction) is +x_local; left is +z_local.
- * Returns offset_forward (along aim axis) and offset_lateral (perpendicular). */
+/* -------------------------------------------------------------------------
+ * Mount offset geometry (unchanged)
+ * ------------------------------------------------------------------------- */
 static void mount_offset(WeaponMount m, float body_sx, float body_sz,
                          float *off_forward, float *off_lateral)
 {
@@ -154,7 +155,9 @@ static void mount_offset(WeaponMount m, float body_sx, float body_sz,
     }
 }
 
-/* Spawn one projectile into the global g_projs[] array */
+/* -------------------------------------------------------------------------
+ * Projectile spawning (unchanged)
+ * ------------------------------------------------------------------------- */
 static void spawn_projectile(int owner_idx, int owner_script,
                               float ox, float oz,
                               float dir_x, float dir_z,
@@ -162,12 +165,10 @@ static void spawn_projectile(int owner_idx, int owner_script,
                               WeaponType wtype)
 {
     const WeaponStats *ws = &WEAPON_STATS[wtype];
-
     unsigned char r = 255, g = 220, b = 50;
     if (wtype == WEAPON_MACHINE_GUN) { r = 200; g = 200; b = 200; }
     if (wtype == WEAPON_LASER)       { r = 255; g =  50; b =  50; }
 
-    /* Find an inactive slot or append */
     int slot = -1;
     for (int i = 0; i < g_proj_count; i++) {
         if (!g_projs[i].active) { slot = i; break; }
@@ -176,14 +177,10 @@ static void spawn_projectile(int owner_idx, int owner_script,
         if (g_proj_count >= MAX_PROJECTILES) return;
         slot = g_proj_count++;
     }
-
-    /* Right-perpendicular of (dir_x, dir_z) in the xz plane (y up).
-     * In body/turret-local coords +z is forward and +x is right; off_lateral
-     * is positive on the right side. */
     float lat_x = +dir_z;
     float lat_z = -dir_x;
 
-    Proj *p = &g_projs[slot];
+    Proj *p       = &g_projs[slot];
     p->active       = true;
     p->x            = ox + dir_x * off_forward + lat_x * off_lateral;
     p->y            = 0.0f;
@@ -199,29 +196,21 @@ static void spawn_projectile(int owner_idx, int owner_script,
     p->damage       = ws->damage;
 }
 
-/* ----------------------------------------------------------------------- */
-static int lua_api_move(lua_State *L) {
-    float dx = (float)luaL_checknumber(L, 1);
-    float dz = (float)luaL_checknumber(L, 2);
+/* -------------------------------------------------------------------------
+ * Current-bot index — set by scripting_set_current_bot() before think().
+ * Python C callbacks read this to locate the right Bot in g_bots[].
+ * ------------------------------------------------------------------------- */
+static int g_current_bot_idx = -1;
+static PyThreadState *g_main_thread_state = NULL;
+static char g_last_error[512] = {0};
 
-    lua_getglobal(L, "__bot_idx");
-    int idx = (int)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    if (idx < 0 || idx >= g_bot_count) return 0;
-    Bot *b = &g_bots[idx];
-    if (!b->active) return 0;
-
-    float len = sqrtf(dx * dx + dz * dz);
-    if (len < 1e-6f) return 0;
-
-    b->inertia.desired_body_angle = atan2f(dz / len, dx / len);
-    b->inertia.move_requested     = 1;
-    return 0;
+void scripting_set_current_bot(int idx) {
+    g_current_bot_idx = idx;
 }
 
-/* ----------------------------------------------------------------------- */
-/* Try to fire a single weapon by index. Returns 1 if a shot was emitted. */
+/* -------------------------------------------------------------------------
+ * Python API callbacks
+ * ------------------------------------------------------------------------- */
 static int try_fire_weapon(Bot *b, int bot_idx, int w, float dir_x, float dir_z) {
     if (w < 0 || w >= b->config.weapon_count) return 0;
     if (b->inertia.weapon_cd[w] > 0.0f) return 0;
@@ -235,100 +224,106 @@ static int try_fire_weapon(Bot *b, int bot_idx, int w, float dir_x, float dir_z)
     return 1;
 }
 
-/* fire(dx, dz) — aim turret toward (dx,dz) and fire ALL mounted weapons. */
-static int lua_api_fire(lua_State *L) {
-    float dx = (float)luaL_checknumber(L, 1);
-    float dz = (float)luaL_checknumber(L, 2);
+/* move(dx, dz) */
+static PyObject *py_api_move(PyObject *self, PyObject *args) {
+    (void)self;
+    double dx, dz;
+    if (!PyArg_ParseTuple(args, "dd", &dx, &dz)) return NULL;
 
-    lua_getglobal(L, "__bot_idx");
-    int idx = (int)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    if (idx < 0 || idx >= g_bot_count) return 0;
+    int idx = g_current_bot_idx;
+    if (idx < 0 || idx >= g_bot_count) Py_RETURN_NONE;
     Bot *b = &g_bots[idx];
-    if (!b->active) return 0;
+    if (!b->active) Py_RETURN_NONE;
 
-    float len = sqrtf(dx * dx + dz * dz);
-    if (len < 1e-6f) return 0;
+    float len = sqrtf((float)(dx * dx + dz * dz));
+    if (len < 1e-6f) Py_RETURN_NONE;
 
-    b->inertia.desired_turret_angle = atan2f(dz / len, dx / len);
+    b->inertia.desired_body_angle = atan2f((float)(dz / len), (float)(dx / len));
+    b->inertia.move_requested     = 1;
+    Py_RETURN_NONE;
+}
 
+/* fire(dx, dz) — fire ALL weapons */
+static PyObject *py_api_fire(PyObject *self, PyObject *args) {
+    (void)self;
+    double dx, dz;
+    if (!PyArg_ParseTuple(args, "dd", &dx, &dz)) return NULL;
+
+    int idx = g_current_bot_idx;
+    if (idx < 0 || idx >= g_bot_count) Py_RETURN_NONE;
+    Bot *b = &g_bots[idx];
+    if (!b->active) Py_RETURN_NONE;
+
+    float len = sqrtf((float)(dx * dx + dz * dz));
+    if (len < 1e-6f) Py_RETURN_NONE;
+
+    b->inertia.desired_turret_angle = atan2f((float)(dz / len), (float)(dx / len));
     float fire_dx = cosf(b->inertia.turret_angle);
     float fire_dz = sinf(b->inertia.turret_angle);
 
     int shots = 0;
-    for (int w = 0; w < b->config.weapon_count; w++) {
+    for (int w = 0; w < b->config.weapon_count; w++)
         shots += try_fire_weapon(b, idx, w, fire_dx, fire_dz);
-    }
+
     if (shots > 0 && b->script_id == LLM_SCRIPT_IDX) {
         update_telemetry_inc_fire_frame();
         update_telemetry_inc_shots_fired(shots);
     }
-    return 0;
+    Py_RETURN_NONE;
 }
 
-/* fire_weapon(idx, dx, dz) — aim turret toward (dx,dz) and fire ONLY weapon idx (1-based). */
-static int lua_api_fire_weapon(lua_State *L) {
-    int   one_based = (int)luaL_checkinteger(L, 1);
-    float dx = (float)luaL_checknumber(L, 2);
-    float dz = (float)luaL_checknumber(L, 3);
+/* fire_weapon(idx, dx, dz) — fire ONE weapon by 0-based index */
+static PyObject *py_api_fire_weapon(PyObject *self, PyObject *args) {
+    (void)self;
+    int    w_idx;
+    double dx, dz;
+    if (!PyArg_ParseTuple(args, "idd", &w_idx, &dx, &dz)) return NULL;
 
-    lua_getglobal(L, "__bot_idx");
-    int idx = (int)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    if (idx < 0 || idx >= g_bot_count) return 0;
+    int idx = g_current_bot_idx;
+    if (idx < 0 || idx >= g_bot_count) Py_RETURN_NONE;
     Bot *b = &g_bots[idx];
-    if (!b->active) return 0;
+    if (!b->active) Py_RETURN_NONE;
 
-    float len = sqrtf(dx * dx + dz * dz);
-    if (len < 1e-6f) return 0;
+    float len = sqrtf((float)(dx * dx + dz * dz));
+    if (len < 1e-6f) Py_RETURN_NONE;
 
-    b->inertia.desired_turret_angle = atan2f(dz / len, dx / len);
-
+    b->inertia.desired_turret_angle = atan2f((float)(dz / len), (float)(dx / len));
     float fire_dx = cosf(b->inertia.turret_angle);
     float fire_dz = sinf(b->inertia.turret_angle);
 
-    int w = one_based - 1; /* Lua is 1-based */
-    int shots = try_fire_weapon(b, idx, w, fire_dx, fire_dz);
+    int shots = try_fire_weapon(b, idx, w_idx, fire_dx, fire_dz);
     if (shots > 0 && b->script_id == LLM_SCRIPT_IDX) {
         update_telemetry_inc_fire_frame();
         update_telemetry_inc_shots_fired(shots);
     }
-    return 0;
+    Py_RETURN_NONE;
 }
 
-/* ----------------------------------------------------------------------- */
-static int lua_api_scan(lua_State *L) {
-    /* radius argument kept for backward-compat but ignored — scan is infinite */
-    (void)luaL_checknumber(L, 1);
-
-    lua_getglobal(L, "__bot_idx");
-    int self_idx = (int)lua_tointeger(L, -1);
-    lua_pop(L, 1);
-
-    if (self_idx < 0 || self_idx >= g_bot_count) {
-        lua_newtable(L);
-        return 1;
+/* scan(radius) — radius ignored; returns list of dicts */
+static PyObject *py_api_scan(PyObject *self, PyObject *args) {
+    (void)self;
+    double radius;
+    if (!PyArg_ParseTuple(args, "d", &radius)) {
+        /* radius is optional — accept call with no args too */
+        PyErr_Clear();
     }
-    Bot *self = &g_bots[self_idx];
-    if (!self->active) { lua_newtable(L); return 1; }
 
-    float sx = self->x;
-    float sz = self->z;
+    int self_idx = g_current_bot_idx;
+    if (self_idx < 0 || self_idx >= g_bot_count) return PyList_New(0);
+    Bot *scanner = &g_bots[self_idx];
+    if (!scanner->active) return PyList_New(0);
 
-    /* reset hit list for this frame */
-    self->inertia.scan_hit_count = 0;
+    float sx = scanner->x;
+    float sz = scanner->z;
+    scanner->inertia.scan_hit_count = 0;
 
-    bool self_is_llm = (self->script_id == LLM_SCRIPT_IDX);
+    bool self_is_llm = (scanner->script_id == LLM_SCRIPT_IDX);
     float nearest_enemy_dist = 0.0f;
     bool  saw_enemy = false;
 
-    lua_newtable(L);
-    int entry = 1;
+    PyObject *result = PyList_New(0);
 
-    /* Bots — infinite range, LOS-only.
-     * Non-LLM bots cannot see each other; only the LLM bot is visible to them. */
+    /* Bots */
     for (int i = 0; i < g_bot_count; i++) {
         if (i == self_idx) continue;
         Bot *b = &g_bots[i];
@@ -336,7 +331,6 @@ static int lua_api_scan(lua_State *L) {
 
         bool target_is_llm = (b->script_id == LLM_SCRIPT_IDX);
         if (!self_is_llm && !target_is_llm) continue;
-
         if (walls_block_segment(sx, sz, b->x, b->z)) continue;
 
         float ddx  = b->x - sx;
@@ -350,26 +344,27 @@ static int lua_api_scan(lua_State *L) {
             }
         }
 
-        int h = self->inertia.scan_hit_count;
+        int h = scanner->inertia.scan_hit_count;
         if (h < MAX_SCAN_HITS) {
-            self->inertia.scan_hit_x[h] = b->x;
-            self->inertia.scan_hit_z[h] = b->z;
-            self->inertia.scan_hit_type[h] = 0;
-            self->inertia.scan_hit_count++;
+            scanner->inertia.scan_hit_x[h]    = b->x;
+            scanner->inertia.scan_hit_z[h]    = b->z;
+            scanner->inertia.scan_hit_type[h] = 0;
+            scanner->inertia.scan_hit_count++;
         }
 
-        lua_newtable(L);
-        lua_pushstring(L, "bot");                        lua_setfield(L, -2, "type");
-        lua_pushnumber(L, (double)b->x);                 lua_setfield(L, -2, "x");
-        lua_pushnumber(L, (double)b->z);                 lua_setfield(L, -2, "z");
-        lua_pushnumber(L, (double)dist);                 lua_setfield(L, -2, "distance");
-        lua_pushinteger(L, b->script_id);                lua_setfield(L, -2, "team");
-        lua_pushnumber(L, (double)b->hp);                lua_setfield(L, -2, "hp");
-        lua_pushnumber(L, (double)b->config.max_hp);     lua_setfield(L, -2, "max_hp");
-        lua_rawseti(L, -2, entry++);
+        PyObject *entry = PyDict_New();
+        PyDict_SetItemString(entry, "type",     PyUnicode_FromString("bot"));
+        PyDict_SetItemString(entry, "x",        PyFloat_FromDouble((double)b->x));
+        PyDict_SetItemString(entry, "z",        PyFloat_FromDouble((double)b->z));
+        PyDict_SetItemString(entry, "distance", PyFloat_FromDouble((double)dist));
+        PyDict_SetItemString(entry, "team",     PyLong_FromLong((long)b->script_id));
+        PyDict_SetItemString(entry, "hp",       PyFloat_FromDouble((double)b->hp));
+        PyDict_SetItemString(entry, "max_hp",   PyFloat_FromDouble((double)b->config.max_hp));
+        PyList_Append(result, entry);
+        Py_DECREF(entry);
     }
 
-    /* Walls — infinite range, no LOS check needed */
+    /* Walls */
     int         wn = walls_count();
     const Wall *wv = walls_get();
     for (int i = 0; i < wn; i++) {
@@ -382,58 +377,149 @@ static int lua_api_scan(lua_State *L) {
         float ddz  = clamp_z - sz;
         float dist = sqrtf(ddx * ddx + ddz * ddz);
 
-        int h = self->inertia.scan_hit_count;
+        int h = scanner->inertia.scan_hit_count;
         if (h < MAX_SCAN_HITS) {
-            self->inertia.scan_hit_x[h] = clamp_x;
-            self->inertia.scan_hit_z[h] = clamp_z;
-            self->inertia.scan_hit_type[h] = 1;
-            self->inertia.scan_hit_count++;
+            scanner->inertia.scan_hit_x[h]    = clamp_x;
+            scanner->inertia.scan_hit_z[h]    = clamp_z;
+            scanner->inertia.scan_hit_type[h] = 1;
+            scanner->inertia.scan_hit_count++;
         }
 
-        lua_newtable(L);
-        lua_pushstring(L, "wall");          lua_setfield(L, -2, "type");
-        lua_pushnumber(L, (double)clamp_x); lua_setfield(L, -2, "x");
-        lua_pushnumber(L, (double)clamp_z); lua_setfield(L, -2, "z");
-        lua_pushnumber(L, (double)dist);    lua_setfield(L, -2, "distance");
-        lua_rawseti(L, -2, entry++);
+        PyObject *entry = PyDict_New();
+        PyDict_SetItemString(entry, "type",     PyUnicode_FromString("wall"));
+        PyDict_SetItemString(entry, "x",        PyFloat_FromDouble((double)clamp_x));
+        PyDict_SetItemString(entry, "z",        PyFloat_FromDouble((double)clamp_z));
+        PyDict_SetItemString(entry, "distance", PyFloat_FromDouble((double)dist));
+        PyList_Append(result, entry);
+        Py_DECREF(entry);
     }
 
-    if (self_is_llm) {
+    if (self_is_llm)
         update_telemetry_inc_think_frame(saw_enemy, nearest_enemy_dist);
+
+    return result;
+}
+
+/* -------------------------------------------------------------------------
+ * API method table and namespace injection
+ * ------------------------------------------------------------------------- */
+static PyMethodDef g_api_methods[] = {
+    {"move",        py_api_move,        METH_VARARGS, "move(dx,dz)"},
+    {"fire",        py_api_fire,        METH_VARARGS, "fire(dx,dz)"},
+    {"fire_weapon", py_api_fire_weapon, METH_VARARGS, "fire_weapon(idx,dx,dz)"},
+    {"scan",        py_api_scan,        METH_VARARGS, "scan(radius)"},
+    {NULL, NULL, 0, NULL}
+};
+
+static void inject_api(PyObject *ns) {
+    for (int i = 0; g_api_methods[i].ml_name; i++) {
+        PyObject *fn = PyCFunction_New(&g_api_methods[i], NULL);
+        if (fn) {
+            PyDict_SetItemString(ns, g_api_methods[i].ml_name, fn);
+            Py_DECREF(fn);
+        }
     }
-    return 1;
 }
 
-/* ----------------------------------------------------------------------- */
-static void register_api(lua_State *L) {
-    lua_register(L, "move",        lua_api_move);
-    lua_register(L, "fire",        lua_api_fire);
-    lua_register(L, "fire_weapon", lua_api_fire_weapon);
-    lua_register(L, "scan",        lua_api_scan);
-}
-
-/* ----------------------------------------------------------------------- */
-
+/* -------------------------------------------------------------------------
+ * scripting_init / scripting_shutdown
+ * ------------------------------------------------------------------------- */
 void scripting_init(void) {
-    /* Nothing to set up now that ECS is gone */
+    if (Py_IsInitialized()) return; /* only init once per process */
+    Py_Initialize();
+    /* Release GIL so that PyGILState_Ensure works correctly in any thread */
+    g_main_thread_state = PyEval_SaveThread();
 }
 
-lua_State *scripting_load(const char *path) {
+void scripting_shutdown(void) {
+    /* Release bot namespaces for the current match. */
+    if (!Py_IsInitialized()) return;
+    for (int i = 0; i < g_bot_count; i++) {
+        if (g_bots[i].py_ns) {
+            PyGILState_STATE gs = PyGILState_Ensure();
+            Py_DECREF(g_bots[i].py_ns);
+            g_bots[i].py_ns = NULL;
+            PyGILState_Release(gs);
+        }
+    }
+    /* NOTE: Py_Finalize() is intentionally NOT called here because
+     * scripting_shutdown() is invoked between matches.  The interpreter
+     * is torn down once at true program exit (see scripting_finalize()). */
+}
+
+void scripting_finalize(void) {
+    if (!Py_IsInitialized()) return;
+    if (g_main_thread_state) {
+        PyEval_RestoreThread(g_main_thread_state);
+        g_main_thread_state = NULL;
+    }
+    Py_Finalize();
+}
+
+/* -------------------------------------------------------------------------
+ * scripting_load
+ * ------------------------------------------------------------------------- */
+PyObject *scripting_load(const char *path) {
     g_last_error[0] = '\0';
 
-    lua_State *L = luaL_newstate();
-    if (!L) return NULL;
-    luaL_openlibs(L);
-    register_api(L);
-    if (luaL_dofile(L, path) != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
-        fprintf(stderr, "[script] Error loading '%s': %s\n", path, msg);
-        if (msg)
-            snprintf(g_last_error, sizeof(g_last_error), "%s", msg);
-        lua_close(L);
+    /* Read source file */
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(g_last_error, sizeof(g_last_error), "cannot open '%s'", path);
         return NULL;
     }
-    return L;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    rewind(f);
+    char *source = (char *)malloc((size_t)fsize + 1);
+    if (!source) { fclose(f); return NULL; }
+    fsize = (long)fread(source, 1, (size_t)fsize, f);
+    source[fsize] = '\0';
+    fclose(f);
+
+    PyGILState_STATE gs = PyGILState_Ensure();
+
+    /* Create a fresh namespace dict */
+    PyObject *ns = PyDict_New();
+
+    /* Inject __builtins__ (needed for exec / import) */
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (builtins) {
+        PyDict_SetItemString(ns, "__builtins__", builtins);
+        Py_DECREF(builtins);
+    }
+
+    /* Inject game API functions */
+    inject_api(ns);
+
+    /* Execute the script in the namespace */
+    PyObject *result = PyRun_String(source, Py_file_input, ns, ns);
+    free(source);
+
+    if (!result) {
+        PyObject *exc_type = NULL, *exc_value = NULL, *exc_tb = NULL;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+        PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+        if (exc_value) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str) {
+                snprintf(g_last_error, sizeof(g_last_error), "%s",
+                         PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
+        }
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        fprintf(stderr, "[script] Error loading '%s': %s\n", path, g_last_error);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
+        return NULL;
+    }
+    Py_DECREF(result);
+
+    PyGILState_Release(gs);
+    return ns;
 }
 
 const char *scripting_get_last_error(void) {
@@ -441,43 +527,65 @@ const char *scripting_get_last_error(void) {
 }
 
 bool scripting_check_syntax_file(const char *path, char *err_buf, int err_size) {
-    lua_State *L = luaL_newstate();
-    if (!L) return false;
-    int rc = luaL_loadfile(L, path);
-    if (rc != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
-        if (msg && err_buf)
-            snprintf(err_buf, (size_t)err_size, "%s", msg);
-        lua_close(L);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (err_buf) snprintf(err_buf, (size_t)err_size, "cannot open '%s'", path);
         return false;
     }
-    lua_close(L);
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    rewind(f);
+    char *source = (char *)malloc((size_t)fsize + 1);
+    if (!source) { fclose(f); return false; }
+    fsize = (long)fread(source, 1, (size_t)fsize, f);
+    source[fsize] = '\0';
+    fclose(f);
+
+    PyGILState_STATE gs = PyGILState_Ensure();
+    PyObject *code = Py_CompileString(source, path, Py_file_input);
+    free(source);
+
+    if (!code) {
+        PyObject *exc_type = NULL, *exc_value = NULL, *exc_tb = NULL;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+        PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+        if (exc_value && err_buf) {
+            PyObject *str = PyObject_Str(exc_value);
+            if (str) {
+                snprintf(err_buf, (size_t)err_size, "%s", PyUnicode_AsUTF8(str));
+                Py_DECREF(str);
+            }
+        }
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+        PyGILState_Release(gs);
+        return false;
+    }
+    Py_DECREF(code);
+    PyGILState_Release(gs);
     return true;
 }
 
-/* ----------------------------------------------------------------------- */
-/* Apply lift/weight model to derive max_hp, max_speed, turn_rate, dims. */
+/* -------------------------------------------------------------------------
+ * Config helpers
+ * ------------------------------------------------------------------------- */
 static void finalize_config(BotConfig *out) {
     const BodyStats       *bs = &BODY_STATS[(int)out->body];
     const LocomotionStats *ls = &LOCO_STATS[(int)out->locomotion];
-
     out->body_sx = bs->sx;
     out->body_sy = bs->sy;
     out->body_sz = bs->sz;
     out->max_hp  = bs->hp;
-
     float w = bs->weight;
-    for (int i = 0; i < out->weapon_count; i++) {
+    for (int i = 0; i < out->weapon_count; i++)
         w += WEAPON_STATS[(int)out->weapons[i].type].weight;
-    }
     out->total_weight = w;
-
-    float factor      = ls->lift / (ls->lift + w);
-    out->max_speed    = ls->base_speed * factor;
-    out->turn_rate    = ls->base_turn  * factor;
+    float factor   = ls->lift / (ls->lift + w);
+    out->max_speed = ls->base_speed * factor;
+    out->turn_rate = ls->base_turn  * factor;
 }
 
-/* Synthesize a 2-weapon array from legacy left_weapon/right_weapon fields. */
 static void synth_legacy_weapons(BotConfig *out, WeaponType lw, WeaponType rw) {
     out->weapon_count        = 2;
     out->weapons[0].type     = lw;
@@ -486,180 +594,139 @@ static void synth_legacy_weapons(BotConfig *out, WeaponType lw, WeaponType rw) {
     out->weapons[1].mount    = MOUNT_RIGHT;
 }
 
-void scripting_call_init(lua_State *L, BotConfig *out) {
-    /* Default config: wheels + cube + 2x AutoCannon (left/right) */
-    out->locomotion   = LOCO_WHEELS;
-    out->body         = BODY_CUBE;
+/* Helper: get a string field from a Python dict, or NULL */
+static const char *dict_get_str(PyObject *d, const char *key) {
+    PyObject *v = PyDict_GetItemString(d, key);
+    if (!v || !PyUnicode_Check(v)) return NULL;
+    return PyUnicode_AsUTF8(v);
+}
+
+/* -------------------------------------------------------------------------
+ * scripting_call_init
+ * ------------------------------------------------------------------------- */
+void scripting_call_init(PyObject *ns, BotConfig *out) {
+    /* Defaults */
+    out->locomotion = LOCO_WHEELS;
+    out->body       = BODY_CUBE;
     synth_legacy_weapons(out, WEAPON_AUTO_CANNON, WEAPON_AUTO_CANNON);
 
-    bool have_weapons_table = false;
-    bool have_left_legacy   = false;
-    bool have_right_legacy  = false;
-    WeaponType legacy_left  = WEAPON_AUTO_CANNON;
-    WeaponType legacy_right = WEAPON_AUTO_CANNON;
+    PyGILState_STATE gs = PyGILState_Ensure();
 
-    lua_getglobal(L, "init");
-    if (lua_type(L, -1) != LUA_TFUNCTION) {
-        lua_pop(L, 1);
+    PyObject *init_fn = PyDict_GetItemString(ns, "init");
+    if (!init_fn || !PyCallable_Check(init_fn)) {
         fprintf(stderr, "[script] init() not found, using defaults\n");
         finalize_config(out);
         goto export_globals;
     }
 
-    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        fprintf(stderr, "[script] init() error: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
+    PyObject *cfg = PyObject_CallObject(init_fn, NULL);
+    if (!cfg) {
+        PyErr_Print();
+        fprintf(stderr, "[script] init() error, using defaults\n");
         finalize_config(out);
         goto export_globals;
     }
-    if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        fprintf(stderr, "[script] init() did not return a table, using defaults\n");
+    if (!PyDict_Check(cfg)) {
+        Py_DECREF(cfg);
+        fprintf(stderr, "[script] init() did not return a dict, using defaults\n");
         finalize_config(out);
         goto export_globals;
     }
 
     /* locomotion */
-    lua_getfield(L, -1, "locomotion");
-    if (lua_isstring(L, -1)) out->locomotion = parse_locomotion(lua_tostring(L, -1));
-    lua_pop(L, 1);
+    const char *loco_str = dict_get_str(cfg, "locomotion");
+    if (loco_str) out->locomotion = parse_locomotion(loco_str);
 
     /* body */
-    lua_getfield(L, -1, "body");
-    if (lua_isstring(L, -1)) out->body = parse_body(lua_tostring(L, -1));
-    lua_pop(L, 1);
+    const char *body_str = dict_get_str(cfg, "body");
+    if (body_str) out->body = parse_body(body_str);
 
-    /* weapons array */
-    lua_getfield(L, -1, "weapons");
-    if (lua_istable(L, -1)) {
+    /* weapons list */
+    bool have_weapons_table = false;
+    PyObject *weapons_list = PyDict_GetItemString(cfg, "weapons");
+    if (weapons_list && PyList_Check(weapons_list)) {
         have_weapons_table = true;
-        int n = (int)lua_rawlen(L, -1);
-        if (n < 1) n = 0;
+        Py_ssize_t n = PyList_Size(weapons_list);
         if (n > MAX_WEAPONS) {
             fprintf(stderr, "[script] weapons[] has %d entries, capping to %d\n",
-                    n, MAX_WEAPONS);
+                    (int)n, MAX_WEAPONS);
             n = MAX_WEAPONS;
         }
         out->weapon_count = 0;
         bool mount_used[5] = {false, false, false, false, false};
-        for (int i = 1; i <= n; i++) {
-            lua_rawgeti(L, -1, i);
-            if (lua_istable(L, -1)) {
-                lua_getfield(L, -1, "type");
-                WeaponType t = parse_weapon(lua_tostring(L, -1));
-                lua_pop(L, 1);
-                lua_getfield(L, -1, "mount");
-                WeaponMount m = parse_mount(lua_tostring(L, -1));
-                lua_pop(L, 1);
-                if (mount_used[(int)m]) {
-                    fprintf(stderr,
-                            "[script] mount collision at slot %d, last entry wins\n", i);
-                    /* Replace prior entry with the same mount */
-                    for (int k = 0; k < out->weapon_count; k++) {
-                        if (out->weapons[k].mount == m) {
-                            out->weapons[k].type = t;
-                            break;
-                        }
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject *w = PyList_GetItem(weapons_list, i);
+            if (!w || !PyDict_Check(w)) {
+                fprintf(stderr, "[script] weapons[%d] is not a dict, ignored\n", (int)i);
+                continue;
+            }
+            const char *type_str  = dict_get_str(w, "type");
+            const char *mount_str = dict_get_str(w, "mount");
+            WeaponType  wtype = parse_weapon(type_str);
+            WeaponMount wmount = parse_mount(mount_str);
+            if (mount_used[(int)wmount]) {
+                fprintf(stderr, "[script] mount collision at slot %d, last entry wins\n", (int)i);
+                for (int k = 0; k < out->weapon_count; k++) {
+                    if (out->weapons[k].mount == wmount) {
+                        out->weapons[k].type = wtype;
+                        break;
                     }
-                } else {
-                    out->weapons[out->weapon_count].type  = t;
-                    out->weapons[out->weapon_count].mount = m;
-                    out->weapon_count++;
-                    mount_used[(int)m] = true;
                 }
             } else {
-                fprintf(stderr,
-                        "[script] weapons[%d] is not a table, ignored\n", i);
+                out->weapons[out->weapon_count].type  = wtype;
+                out->weapons[out->weapon_count].mount = wmount;
+                out->weapon_count++;
+                mount_used[(int)wmount] = true;
             }
-            lua_pop(L, 1);
         }
         if (out->weapon_count == 0) {
-            fprintf(stderr,
-                    "[script] weapons[] empty, falling back to default 2x AutoCannon\n");
+            fprintf(stderr, "[script] weapons[] empty, falling back to default 2x AutoCannon\n");
             synth_legacy_weapons(out, WEAPON_AUTO_CANNON, WEAPON_AUTO_CANNON);
         }
     }
-    lua_pop(L, 1);
 
-    /* legacy left_weapon / right_weapon (used only if `weapons` absent) */
-    lua_getfield(L, -1, "left_weapon");
-    if (lua_isstring(L, -1)) {
-        have_left_legacy = true;
-        legacy_left = parse_weapon(lua_tostring(L, -1));
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, -1, "right_weapon");
-    if (lua_isstring(L, -1)) {
-        have_right_legacy = true;
-        legacy_right = parse_weapon(lua_tostring(L, -1));
-    }
-    lua_pop(L, 1);
-
-    if (!have_weapons_table && (have_left_legacy || have_right_legacy)) {
-        WeaponType lw = have_left_legacy  ? legacy_left  : WEAPON_AUTO_CANNON;
-        WeaponType rw = have_right_legacy ? legacy_right : WEAPON_AUTO_CANNON;
-        synth_legacy_weapons(out, lw, rw);
+    /* Legacy left_weapon / right_weapon (if no weapons list) */
+    if (!have_weapons_table) {
+        const char *lw_str = dict_get_str(cfg, "left_weapon");
+        const char *rw_str = dict_get_str(cfg, "right_weapon");
+        if (lw_str || rw_str) {
+            WeaponType lw = lw_str ? parse_weapon(lw_str) : WEAPON_AUTO_CANNON;
+            WeaponType rw = rw_str ? parse_weapon(rw_str) : WEAPON_AUTO_CANNON;
+            synth_legacy_weapons(out, lw, rw);
+        }
     }
 
-    /* Legacy `armour` field is now ignored. Warn once per file load. */
-    lua_getfield(L, -1, "armour");
-    if (!lua_isnil(L, -1)) {
-        fprintf(stderr,
-                "[script] legacy 'armour' field ignored — use locomotion/body/weapons instead\n");
-    }
-    lua_pop(L, 1);
-
-    lua_pop(L, 1); /* the init() result table */
+    Py_DECREF(cfg);
     finalize_config(out);
 
 export_globals:
-    /* Per-bot globals exposed to think() */
-    lua_pushstring(L, locomotion_name(out->locomotion));
-    lua_setglobal(L, "self_locomotion");
-    lua_pushstring(L, body_name(out->body));
-    lua_setglobal(L, "self_body");
+    /* Export per-bot globals into the namespace so think() can read them */
+    PyDict_SetItemString(ns, "self_locomotion",
+                         PyUnicode_FromString(locomotion_name(out->locomotion)));
+    PyDict_SetItemString(ns, "self_body",
+                         PyUnicode_FromString(body_name(out->body)));
 
-    /* self_weapons = { "MachineGun", "Laser", ... } and self_weapon_count */
-    lua_newtable(L);
+    /* self_weapons = ["MachineGun", ...] */
+    PyObject *wlist = PyList_New(0);
+    for (int i = 0; i < out->weapon_count; i++)
+        PyList_Append(wlist, PyUnicode_FromString(weapon_name(out->weapons[i].type)));
+    PyDict_SetItemString(ns, "self_weapons", wlist);
+    Py_DECREF(wlist);
+    PyDict_SetItemString(ns, "self_weapon_count", PyLong_FromLong((long)out->weapon_count));
+
+    /* Backward-compat: self_left_weapon / self_right_weapon */
+    const char *lname = NULL, *rname = NULL;
     for (int i = 0; i < out->weapon_count; i++) {
-        lua_pushstring(L, weapon_name(out->weapons[i].type));
-        lua_rawseti(L, -2, i + 1);
+        if (out->weapons[i].mount == MOUNT_LEFT)  lname = weapon_name(out->weapons[i].type);
+        if (out->weapons[i].mount == MOUNT_RIGHT) rname = weapon_name(out->weapons[i].type);
     }
-    lua_setglobal(L, "self_weapons");
-    lua_pushinteger(L, (lua_Integer)out->weapon_count);
-    lua_setglobal(L, "self_weapon_count");
+    if (!lname && out->weapon_count > 0) lname = weapon_name(out->weapons[0].type);
+    if (!rname && out->weapon_count > 0) rname = weapon_name(out->weapons[out->weapon_count - 1].type);
+    if (lname) PyDict_SetItemString(ns, "self_left_weapon",  PyUnicode_FromString(lname));
+    if (rname) PyDict_SetItemString(ns, "self_right_weapon", PyUnicode_FromString(rname));
 
-    /* Backward-compat: keep self_left_weapon/self_right_weapon set to the
-     * weapons mounted at MOUNT_LEFT / MOUNT_RIGHT (or the first/last if
-     * the script does not use those mounts). */
-    {
-        const char *lname = NULL;
-        const char *rname = NULL;
-        for (int i = 0; i < out->weapon_count; i++) {
-            if (out->weapons[i].mount == MOUNT_LEFT)  lname = weapon_name(out->weapons[i].type);
-            if (out->weapons[i].mount == MOUNT_RIGHT) rname = weapon_name(out->weapons[i].type);
-        }
-        if (!lname && out->weapon_count > 0)
-            lname = weapon_name(out->weapons[0].type);
-        if (!rname && out->weapon_count > 0)
-            rname = weapon_name(out->weapons[out->weapon_count - 1].type);
-        if (lname) { lua_pushstring(L, lname); lua_setglobal(L, "self_left_weapon");  }
-        if (rname) { lua_pushstring(L, rname); lua_setglobal(L, "self_right_weapon"); }
-    }
+    PyDict_SetItemString(ns, "self_max_hp",    PyFloat_FromDouble((double)out->max_hp));
+    PyDict_SetItemString(ns, "self_max_speed", PyFloat_FromDouble((double)out->max_speed));
 
-    lua_pushnumber(L, (double)out->max_hp);
-    lua_setglobal(L, "self_max_hp");
-    lua_pushnumber(L, (double)out->max_speed);
-    lua_setglobal(L, "self_max_speed");
-}
-
-void scripting_shutdown(void) {
-    /* Close all bot Lua states */
-    for (int i = 0; i < g_bot_count; i++) {
-        if (g_bots[i].L) {
-            lua_close(g_bots[i].L);
-            g_bots[i].L = NULL;
-        }
-    }
+    PyGILState_Release(gs);
 }

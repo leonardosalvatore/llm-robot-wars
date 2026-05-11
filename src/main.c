@@ -45,13 +45,13 @@ int  g_proj_count = 0;
 
 /* ----------------------------------------------------------------------- */
 static const char *script_paths[TOTAL_SCRIPTS] = {
-    "scripts/bot_light.lua",
-    "scripts/bot_skirmisher.lua",
-    "scripts/bot_chaser.lua",
-    "scripts/bot_duelist.lua",
-    "scripts/bot_lancer.lua",
-    "scripts/bot_fortress.lua",
-    "scripts/bot_llm.lua",
+    "scripts/bot_light.py",
+    "scripts/bot_skirmisher.py",
+    "scripts/bot_chaser.py",
+    "scripts/bot_duelist.py",
+    "scripts/bot_lancer.py",
+    "scripts/bot_fortress.py",
+    "scripts/bot_llm.py",
 };
 
 static const char *script_labels[TOTAL_SCRIPTS] = {
@@ -94,8 +94,8 @@ static float randf(float lo, float hi) {
 }
 
 #define CFG_PATH "llama-wars.cfg"
-#define BOT_LLM_PATH        "scripts/bot_llm.lua"
-#define BOT_LLM_BACKUP_PATH "scripts/bot_llm.lua.backup"
+#define BOT_LLM_PATH        "scripts/bot_llm.py"
+#define BOT_LLM_BACKUP_PATH "scripts/bot_llm.py.backup"
 
 static bool copy_file_overwrite(const char *src, const char *dst) {
     FILE *in = fopen(src, "rb");
@@ -1079,10 +1079,10 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
             tries++;
         } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
 
-        lua_State *L = scripting_load(script_paths[script_idx]);
+        PyObject *ns = scripting_load(script_paths[script_idx]);
         BotConfig cfg;
-        if (L) {
-            scripting_call_init(L, &cfg);
+        if (ns) {
+            scripting_call_init(ns, &cfg);
         } else {
             memset(&cfg, 0, sizeof(cfg));
             cfg.locomotion       = LOCO_WHEELS;
@@ -1117,7 +1117,7 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
         bot->hp        = cfg.max_hp;
         bot->config    = cfg;
         bot->inertia   = (BotInertia){0};
-        bot->L         = L;
+        bot->py_ns     = ns;
     }
 }
 
@@ -1165,15 +1165,15 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
                 tries++;
             } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
 
-            lua_State *L = scripting_load(script_paths[s]);
-            if (!L && s == LLM_SCRIPT_IDX && ms->llm_load_error[0] == '\0') {
+            PyObject *ns = scripting_load(script_paths[s]);
+            if (!ns && s == LLM_SCRIPT_IDX && ms->llm_load_error[0] == '\0') {
                 const char *err = scripting_get_last_error();
                 if (err)
                     snprintf(ms->llm_load_error, sizeof(ms->llm_load_error), "%s", err);
             }
             BotConfig cfg;
-            if (L) {
-                scripting_call_init(L, &cfg);
+            if (ns) {
+                scripting_call_init(ns, &cfg);
             } else {
                 memset(&cfg, 0, sizeof(cfg));
                 cfg.locomotion       = LOCO_WHEELS;
@@ -1210,7 +1210,7 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
             bot->script_id = s;
             bot->config    = cfg;
             bot->inertia   = (BotInertia){0};
-            bot->L         = L;
+            bot->py_ns     = ns;
         }
     }
 }
@@ -2021,6 +2021,7 @@ int main(void) {
 
     lighting_shutdown();
     fx_shutdown();
+    scripting_finalize();
     CloseWindow();
     return 0;
 }

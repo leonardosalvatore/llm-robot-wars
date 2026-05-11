@@ -18,26 +18,9 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(raylib)
 
-# Lua 5.4 — official repo has no CMakeLists.txt, so we build it manually.
-FetchContent_Declare(
-    lua
-    GIT_REPOSITORY https://github.com/lua/lua.git
-    GIT_TAG        v5.4.7
-)
-cmake_policy(SET CMP0169 OLD)
-FetchContent_GetProperties(lua)
-if(NOT lua_POPULATED)
-    FetchContent_Populate(lua)
-    file(GLOB LUA_SOURCES "${lua_SOURCE_DIR}/*.c")
-    list(FILTER LUA_SOURCES EXCLUDE REGEX "/lua\\.c$")
-    list(FILTER LUA_SOURCES EXCLUDE REGEX "/luac\\.c$")
-    list(FILTER LUA_SOURCES EXCLUDE REGEX "/onelua\\.c$")
-    add_library(lua_static STATIC ${LUA_SOURCES})
-    target_include_directories(lua_static PUBLIC "${lua_SOURCE_DIR}")
-    if(UNIX)
-        target_compile_definitions(lua_static PRIVATE LUA_USE_POSIX)
-    endif()
-endif()
+# Python 3 — use system installation
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+message(STATUS "Python3: ${Python3_VERSION}, include: ${Python3_INCLUDE_DIRS}, libs: ${Python3_LIBRARIES}")
 
 # raygui — single-header immediate-mode GUI, compatible with raylib 5.0
 FetchContent_Declare(
@@ -64,13 +47,14 @@ add_executable(llama-wars
 target_include_directories(llama-wars PRIVATE
     src
     llm
+    ${Python3_INCLUDE_DIRS}
 )
 target_include_directories(llama-wars SYSTEM PRIVATE
     "${raygui_SOURCE_DIR}/src"
 )
 target_link_libraries(llama-wars PRIVATE
     raylib
-    lua_static
+    ${Python3_LIBRARIES}
     Threads::Threads
 )
 

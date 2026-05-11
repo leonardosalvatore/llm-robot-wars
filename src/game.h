@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <Python.h>
 
 #define CUBE_SIZE 0.4f
 
@@ -85,7 +86,7 @@ typedef struct {
     int     script_id;         /* team / script slot index */
     BotConfig  config;
     BotInertia inertia;
-    struct lua_State *L;
+    PyObject  *py_ns;          /* Python namespace dict for this bot's script */
 } Bot;
 
 typedef struct {

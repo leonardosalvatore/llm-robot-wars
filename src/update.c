@@ -1,9 +1,9 @@
 #include "update.h"
 #include "walls.h"
 #include "fx.h"
+#include "scripting.h"
 
-#include "lua.h"
-#include "lauxlib.h"
+#include <Python.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -96,49 +96,67 @@ static float angle_step(float current, float desired, float rate, float dt) {
 /* ----------------------------------------------------------------------- */
 
 void update_scripts(Bot *bots, int count, float dt) {
+    PyGILState_STATE gs = PyGILState_Ensure();
+
     for (int i = 0; i < count; i++) {
         Bot *b = &bots[i];
-        if (!b->active || !b->L) continue;
+        if (!b->active || !b->py_ns) continue;
 
-        lua_State *L = b->L;
+        PyObject *ns = b->py_ns;
 
-        lua_pushinteger(L, (lua_Integer)i);
-        lua_setglobal(L, "__bot_idx");
-        lua_pushnumber(L, (double)b->x);      lua_setglobal(L, "self_x");
-        lua_pushnumber(L, (double)b->z);       lua_setglobal(L, "self_z");
-        lua_pushinteger(L, b->script_id);      lua_setglobal(L, "self_team");
-        lua_pushnumber(L, (double)b->hp);      lua_setglobal(L, "self_hp");
-        lua_pushnumber(L, (double)b->config.max_hp); lua_setglobal(L, "self_max_hp");
+        /* Inject per-frame globals into the bot's namespace */
+        PyDict_SetItemString(ns, "self_x",      PyFloat_FromDouble((double)b->x));
+        PyDict_SetItemString(ns, "self_z",       PyFloat_FromDouble((double)b->z));
+        PyDict_SetItemString(ns, "self_team",    PyLong_FromLong((long)b->script_id));
+        PyDict_SetItemString(ns, "self_hp",      PyFloat_FromDouble((double)b->hp));
+        PyDict_SetItemString(ns, "self_max_hp",  PyFloat_FromDouble((double)b->config.max_hp));
 
-        lua_getglobal(L, "think");
-        if (lua_type(L, -1) != LUA_TFUNCTION) {
-            lua_pop(L, 1);
-            continue;
-        }
-        lua_pushnumber(L, (double)dt);
-        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-            const char *err = lua_tostring(L, -1);
-            if (err == NULL) err = "(unknown error)";
+        PyObject *think_fn = PyDict_GetItemString(ns, "think");
+        if (!think_fn || !PyCallable_Check(think_fn)) continue;
+
+        /* Tell API callbacks which bot is active */
+        scripting_set_current_bot(i);
+
+        PyObject *ret = PyObject_CallFunction(think_fn, "d", (double)dt);
+        if (!ret) {
+            PyObject *exc_type = NULL, *exc_value = NULL, *exc_tb = NULL;
+            PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+            PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+            const char *err = "(unknown error)";
+            PyObject *err_str = NULL;
+            if (exc_value) {
+                err_str = PyObject_Str(exc_value);
+                if (err_str) err = PyUnicode_AsUTF8(err_str);
+            }
+
             if (i < MAX_BOTS_DEDUP) {
                 if (strncmp(s_last_script_err[i], err, 255) != 0) {
                     fprintf(stderr, "[script] bot %d: %s\n", i, err);
                     strncpy(s_last_script_err[i], err, 255);
                     s_last_script_err[i][255] = '\0';
-                    /* Capture first unique runtime error from LLM bots for prompt feedback */
                     if (b->script_id == LLM_SCRIPT_IDX && g_last_runtime_error[0] == '\0') {
-                        strncpy(g_last_runtime_error, err, sizeof(g_last_runtime_error) - 1);
-                        g_last_runtime_error[sizeof(g_last_runtime_error) - 1] = '\0';
+                        strncpy(g_last_runtime_error, err,
+                                sizeof(g_last_runtime_error) - 1);
                     }
                 }
             } else {
                 fprintf(stderr, "[script] bot %d: %s\n", i, err);
             }
-            lua_pop(L, 1);
-        } else if (i < MAX_BOTS_DEDUP && s_last_script_err[i][0] != '\0') {
-            /* Script recovered — reset so the next error is printed */
-            s_last_script_err[i][0] = '\0';
+
+            Py_XDECREF(err_str);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_value);
+            Py_XDECREF(exc_tb);
+        } else {
+            Py_DECREF(ret);
+            if (i < MAX_BOTS_DEDUP && s_last_script_err[i][0] != '\0')
+                s_last_script_err[i][0] = '\0';
         }
     }
+
+    scripting_set_current_bot(-1);
+    PyGILState_Release(gs);
 }
 
 void update_inertia(Bot *bots, int count, float dt) {
@@ -243,7 +261,12 @@ void update_projectiles(Proj *projs, int *pcount, Bot *bots, int bcount, float d
                         if (p->owner_script == LLM_SCRIPT_IDX)
                             g_llm_kills++;
                         fx_explosion(b->x, b->z);
-                        if (b->L) { lua_close(b->L); b->L = NULL; }
+                        if (b->py_ns) {
+                            PyGILState_STATE bgs = PyGILState_Ensure();
+                            Py_DECREF(b->py_ns);
+                            b->py_ns = NULL;
+                            PyGILState_Release(bgs);
+                        }
                         b->active = false;
                     }
                     dead = true;

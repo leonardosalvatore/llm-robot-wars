@@ -1,6 +1,8 @@
 #include "llama_bot.h"
 #include "llama_client.h"
 
+#include <Python.h>
+
 #include <pthread.h>
 #include <time.h>
 #include <stdio.h>
@@ -10,18 +12,14 @@
 #include <stdarg.h>
 #include <math.h>
 
-#include "lua.h"
-#include "lauxlib.h"
-#include "lualib.h"
-
 #define SCRIPT_BUF_SIZE   (32  * 1024)
 #define RESPONSE_BUF_SIZE (128 * 1024)
 #define PROMPT_BUF_SIZE   (24  * 1024)
 
 /* ----------------------------------------------------------------------- */
-static char g_host[80]         = {0};
-static int  g_port             = 8080;
-static char g_script_path[256] = {0};
+static char g_host[80]          = {0};
+static int  g_port              = 8080;
+static char g_script_path[256]  = {0};
 static char g_user_prompt[1024] = {0};
 
 static pthread_mutex_t g_mutex        = PTHREAD_MUTEX_INITIALIZER;
@@ -48,9 +46,7 @@ static bool           g_gen_error_pending   = false;
 static MatchStats g_match_history[MATCH_HISTORY_SIZE];
 static int        g_match_history_count = 0;
 
-/* Single-slot queue: if a match ends while a generation is still running, we
- * stash its stats here and submit it as soon as the generation thread exits.
- * Keeping only the newest guarantees the LLM always sees the latest match. */
+/* Single-slot queue for matches arriving while generation is busy */
 static bool       g_pending_match_valid = false;
 static MatchStats g_pending_match;
 
@@ -119,10 +115,13 @@ void llm_bot_get_vis_state(LlmVisState *out) {
 }
 
 /* ----------------------------------------------------------------------- */
-static void extract_lua(const char *response, char *out, int out_size) {
-    const char *start = strstr(response, "```lua");
+/* Extract the Python script from a model response.
+ * Looks for ```python fence first, then a bare ``` fence, then falls back to
+ * treating the whole response as raw source. */
+static void extract_python(const char *response, char *out, int out_size) {
+    const char *start = strstr(response, "```python");
     if (start) {
-        start += 6;
+        start += 9;
         if (*start == '\n') start++;
     } else {
         start = strstr(response, "```");
@@ -145,8 +144,7 @@ static void extract_lua(const char *response, char *out, int out_size) {
             out[len] = '\0';
             return;
         }
-        /* Opening fence found but no closing fence (truncated response).
-         * Use everything after the opening fence anyway. */
+        /* Opening fence but no closing fence — use everything after. */
         int len = (int)strlen(start);
         if (len >= out_size) len = out_size - 1;
         while (len > 0 && (start[len-1] == '\n' || start[len-1] == '\r'
@@ -157,14 +155,12 @@ static void extract_lua(const char *response, char *out, int out_size) {
         return;
     }
 
-    /* No fences at all -- strip any leading backticks just in case */
+    /* No fences — strip any leading backticks / language hint */
     const char *p = response;
     while (*p == '`') p++;
     while (*p == '\n' || *p == '\r') p++;
-    /* Strip bare language-hint line ("lua\n") that some models emit
-     * instead of a proper ```lua fence */
-    if (strncmp(p, "lua\n", 4) == 0)        p += 4;
-    else if (strncmp(p, "lua\r\n", 5) == 0) p += 5;
+    if (strncmp(p, "python\n",   7) == 0) p += 7;
+    else if (strncmp(p, "python\r\n", 8) == 0) p += 8;
     int len = (int)strlen(p);
     if (len >= out_size) len = out_size - 1;
     memcpy(out, p, (size_t)len);
@@ -172,13 +168,12 @@ static void extract_lua(const char *response, char *out, int out_size) {
 }
 
 /* ----------------------------------------------------------------------- */
-/* Smoke-test harness: registers fake move/fire/fire_weapon/scan into the
- * Lua state, then runs a multi-frame combat simulation with 4 enemies
- * orbiting the (stationary) bot from the four cardinal directions. We
- * record every fire/fire_weapon call and check whether at least one of
- * them was aimed within ~30 degrees of any of the four enemies. If not,
- * we reject the script with a detailed report so the next regeneration
- * gets actionable feedback. */
+/* Smoke-test harness — creates an isolated Python namespace, injects stub
+ * move/fire/fire_weapon/scan, runs init() + 60 frames of think() with 4
+ * orbiting enemies, and verifies at least one fire call aimed within 30°.
+ * Operates entirely on the source STRING — no file I/O — so callers can
+ * validate before writing to disk. */
+
 #define SMOKE_NUM_ENEMIES 4
 #define SMOKE_AIM_COS     0.866   /* cos(30 deg) */
 
@@ -199,8 +194,7 @@ static void smoke_record_fire(double dx, double dz) {
     g_smoke.fire_calls_total++;
     double len = sqrt(dx * dx + dz * dz);
     if (len < 1e-6) return;
-    double nx = dx / len;
-    double nz = dz / len;
+    double nx = dx / len, nz = dz / len;
     for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
         double edx = g_smoke.enemy_x[i] - g_smoke.bot_x;
         double edz = g_smoke.enemy_z[i] - g_smoke.bot_z;
@@ -214,88 +208,87 @@ static void smoke_record_fire(double dx, double dz) {
     }
 }
 
-static int smoke_move(lua_State *L) {
-    (void)L;
-    return 0;
+static PyObject *py_smoke_move(PyObject *s, PyObject *args) {
+    (void)s; (void)args; Py_RETURN_NONE;
 }
 
-static int smoke_fire(lua_State *L) {
-    double dx = (double)luaL_checknumber(L, 1);
-    double dz = (double)luaL_checknumber(L, 2);
+static PyObject *py_smoke_fire(PyObject *s, PyObject *args) {
+    (void)s;
+    double dx, dz;
+    if (!PyArg_ParseTuple(args, "dd", &dx, &dz)) return NULL;
     smoke_record_fire(dx, dz);
-    return 0;
+    Py_RETURN_NONE;
 }
 
-static int smoke_fire_weapon(lua_State *L) {
-    (void)luaL_checkinteger(L, 1);
-    double dx = (double)luaL_checknumber(L, 2);
-    double dz = (double)luaL_checknumber(L, 3);
+static PyObject *py_smoke_fire_weapon(PyObject *s, PyObject *args) {
+    (void)s;
+    int    w;
+    double dx, dz;
+    if (!PyArg_ParseTuple(args, "idd", &w, &dx, &dz)) return NULL;
     smoke_record_fire(dx, dz);
-    return 0;
+    Py_RETURN_NONE;
 }
 
-static int smoke_scan(lua_State *L) {
-    (void)luaL_optnumber(L, 1, 0.0);
+static PyObject *py_smoke_scan(PyObject *s, PyObject *args) {
+    (void)s; (void)args;
+    PyErr_Clear();
 
-    lua_newtable(L);
-    int slot = 1;
-
+    PyObject *result = PyList_New(0);
     for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
         double dx   = g_smoke.enemy_x[i] - g_smoke.bot_x;
         double dz   = g_smoke.enemy_z[i] - g_smoke.bot_z;
         double dist = sqrt(dx * dx + dz * dz);
 
-        lua_newtable(L);
-        lua_pushstring(L, "bot");                lua_setfield(L, -2, "type");
-        lua_pushnumber(L, g_smoke.enemy_x[i]);   lua_setfield(L, -2, "x");
-        lua_pushnumber(L, g_smoke.enemy_z[i]);   lua_setfield(L, -2, "z");
-        lua_pushnumber(L, dist);                 lua_setfield(L, -2, "distance");
-        lua_pushinteger(L, 1);                   lua_setfield(L, -2, "team");
-        lua_pushnumber(L, 100.0);                lua_setfield(L, -2, "hp");
-        lua_pushnumber(L, 150.0);                lua_setfield(L, -2, "max_hp");
-        lua_rawseti(L, -2, slot++);
+        PyObject *entry = PyDict_New();
+        PyDict_SetItemString(entry, "type",     PyUnicode_FromString("bot"));
+        PyDict_SetItemString(entry, "x",        PyFloat_FromDouble(g_smoke.enemy_x[i]));
+        PyDict_SetItemString(entry, "z",        PyFloat_FromDouble(g_smoke.enemy_z[i]));
+        PyDict_SetItemString(entry, "distance", PyFloat_FromDouble(dist));
+        PyDict_SetItemString(entry, "team",     PyLong_FromLong(1));
+        PyDict_SetItemString(entry, "hp",       PyFloat_FromDouble(100.0));
+        PyDict_SetItemString(entry, "max_hp",   PyFloat_FromDouble(150.0));
+        PyList_Append(result, entry);
+        Py_DECREF(entry);
     }
 
-    /* A distant wall so that wall-avoidance code paths get exercised but
-     * the wall does not crowd the enemies. */
-    lua_newtable(L);
-    lua_pushstring(L, "wall"); lua_setfield(L, -2, "type");
-    lua_pushnumber(L, 18.0);   lua_setfield(L, -2, "x");
-    lua_pushnumber(L,  0.0);   lua_setfield(L, -2, "z");
-    lua_pushnumber(L, 18.0);   lua_setfield(L, -2, "distance");
-    lua_rawseti(L, -2, slot++);
+    /* Distant wall so wall-avoidance code paths are exercised */
+    PyObject *wall = PyDict_New();
+    PyDict_SetItemString(wall, "type",     PyUnicode_FromString("wall"));
+    PyDict_SetItemString(wall, "x",        PyFloat_FromDouble(18.0));
+    PyDict_SetItemString(wall, "z",        PyFloat_FromDouble(0.0));
+    PyDict_SetItemString(wall, "distance", PyFloat_FromDouble(18.0));
+    PyList_Append(result, wall);
+    Py_DECREF(wall);
 
-    return 1;
+    return result;
 }
 
-static void smoke_set_globals(lua_State *L, double x, double z,
-                              double hp, double max_hp) {
-    lua_pushnumber(L, x);      lua_setglobal(L, "self_x");
-    lua_pushnumber(L, z);      lua_setglobal(L, "self_z");
-    lua_pushnumber(L, x);      lua_setglobal(L, "self_last_x");
-    lua_pushnumber(L, z);      lua_setglobal(L, "self_last_z");
-    lua_pushinteger(L, 6);     lua_setglobal(L, "self_team");
-    lua_pushnumber(L, hp);     lua_setglobal(L, "self_hp");
-    lua_pushnumber(L, max_hp); lua_setglobal(L, "self_max_hp");
+static PyMethodDef g_smoke_methods[] = {
+    {"move",        py_smoke_move,        METH_VARARGS, NULL},
+    {"fire",        py_smoke_fire,        METH_VARARGS, NULL},
+    {"fire_weapon", py_smoke_fire_weapon, METH_VARARGS, NULL},
+    {"scan",        py_smoke_scan,        METH_VARARGS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
+static void smoke_set_globals(PyObject *ns, double x, double z,
+                               double hp, double max_hp) {
+    PyDict_SetItemString(ns, "self_x",      PyFloat_FromDouble(x));
+    PyDict_SetItemString(ns, "self_z",      PyFloat_FromDouble(z));
+    PyDict_SetItemString(ns, "self_team",   PyLong_FromLong(6));
+    PyDict_SetItemString(ns, "self_hp",     PyFloat_FromDouble(hp));
+    PyDict_SetItemString(ns, "self_max_hp", PyFloat_FromDouble(max_hp));
 }
 
 static void smoke_init_arena(void) {
     memset(&g_smoke, 0, sizeof(g_smoke));
-
-    /* Four enemies, distance ~3.5u from the bot, one in each cardinal
-     * direction, each moving tangentially at a different speed so the bot
-     * has to keep re-acquiring across the simulation. */
-    /* +x  (front)   slow tangent */
-    g_smoke.enemy_x[0] =  3.5; g_smoke.enemy_z[0] =  0.0;
+    g_smoke.enemy_x[0]  =  3.5; g_smoke.enemy_z[0]  =  0.0;
     g_smoke.enemy_vx[0] =  0.0; g_smoke.enemy_vz[0] =  1.5;
-    /* -x  (back)    medium tangent (opposite direction) */
-    g_smoke.enemy_x[1] = -3.5; g_smoke.enemy_z[1] =  0.0;
+    g_smoke.enemy_x[1]  = -3.5; g_smoke.enemy_z[1]  =  0.0;
     g_smoke.enemy_vx[1] =  0.0; g_smoke.enemy_vz[1] = -2.5;
-    /* +z  (left)    fast tangent */
-    g_smoke.enemy_x[2] =  0.0; g_smoke.enemy_z[2] =  3.5;
+    g_smoke.enemy_x[2]  =  0.0; g_smoke.enemy_z[2]  =  3.5;
     g_smoke.enemy_vx[2] =  3.0; g_smoke.enemy_vz[2] =  0.0;
-    /* -z  (right)   slow tangent */
-    g_smoke.enemy_x[3] =  0.0; g_smoke.enemy_z[3] = -3.5;
+    g_smoke.enemy_x[3]  =  0.0; g_smoke.enemy_z[3]  = -3.5;
     g_smoke.enemy_vx[3] = -1.0; g_smoke.enemy_vz[3] =  0.0;
 }
 
@@ -303,7 +296,6 @@ static void smoke_step_enemies(double dt) {
     for (int i = 0; i < SMOKE_NUM_ENEMIES; i++) {
         g_smoke.enemy_x[i] += g_smoke.enemy_vx[i] * dt;
         g_smoke.enemy_z[i] += g_smoke.enemy_vz[i] * dt;
-        /* Bounce them back so they stay within scan-and-fire range (5u). */
         double r = sqrt(g_smoke.enemy_x[i] * g_smoke.enemy_x[i]
                       + g_smoke.enemy_z[i] * g_smoke.enemy_z[i]);
         if (r > 5.0) {
@@ -313,101 +305,130 @@ static void smoke_step_enemies(double dt) {
     }
 }
 
-static bool smoke_test_script(const char *path, char *err, int err_size) {
-    lua_State *L = luaL_newstate();
-    if (!L) {
-        snprintf(err, (size_t)err_size, "smoke test: failed to create Lua state");
-        return false;
+/* Helper: format a Python exception into a C string */
+static void fetch_py_error(char *buf, int size) {
+    PyObject *exc_type = NULL, *exc_value = NULL, *exc_tb = NULL;
+    PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+    PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+    buf[0] = '\0';
+    if (exc_value) {
+        PyObject *str = PyObject_Str(exc_value);
+        if (str) {
+            snprintf(buf, (size_t)size, "%s", PyUnicode_AsUTF8(str));
+            Py_DECREF(str);
+        }
+    }
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_value);
+    Py_XDECREF(exc_tb);
+}
+
+/* Run the full smoke test on an in-memory Python source string.
+ * This is the core validation; no file I/O happens here. */
+static bool smoke_test_source(const char *source, char *err, int err_size) {
+    PyGILState_STATE gs = PyGILState_Ensure();
+
+    /* Build fresh namespace */
+    PyObject *ns = PyDict_New();
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (builtins) {
+        PyDict_SetItemString(ns, "__builtins__", builtins);
+        Py_DECREF(builtins);
+    }
+    for (int i = 0; g_smoke_methods[i].ml_name; i++) {
+        PyObject *fn = PyCFunction_New(&g_smoke_methods[i], NULL);
+        if (fn) { PyDict_SetItemString(ns, g_smoke_methods[i].ml_name, fn); Py_DECREF(fn); }
     }
 
-    luaL_openlibs(L);
-    lua_register(L, "move",        smoke_move);
-    lua_register(L, "fire",        smoke_fire);
-    lua_register(L, "fire_weapon", smoke_fire_weapon);
-    lua_register(L, "scan",        smoke_scan);
-
-    /* Stage 1: load the script with NO self_* globals set. This mirrors what
-     * the engine does (scripting_load runs luaL_dofile before any per-frame
-     * globals exist) and rejects scripts whose file-scope code touches
-     * self_x / self_z / self_team / self_hp. */
-    if (luaL_dofile(L, path) != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
+    /* Stage 1: execute script with NO self_* globals set.
+     * Rejects scripts whose file-scope code reads self_x / self_z / etc. */
+    PyObject *exec_result = PyRun_String(source, Py_file_input, ns, ns);
+    if (!exec_result) {
+        char py_err[480];
+        fetch_py_error(py_err, (int)sizeof(py_err));
         snprintf(err, (size_t)err_size,
                  "smoke test: file-scope load crashed: %s. "
                  "Move any code that reads self_x/self_z/self_team/self_hp "
-                 "into init() or think(); those globals are nil at file scope.",
-                 msg ? msg : "(unknown error)");
-        lua_close(L);
+                 "into init() or think(); those globals are None at file scope.",
+                 py_err);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
         return false;
     }
+    Py_DECREF(exec_result);
 
-    /* Stage 2: init() must be a function and return a table. */
-    smoke_set_globals(L, 0.0, 0.0, 250.0, 250.0);
-    lua_getglobal(L, "init");
-    if (lua_type(L, -1) != LUA_TFUNCTION) {
+    /* Stage 2: init() must exist and return a dict */
+    smoke_set_globals(ns, 0.0, 0.0, 250.0, 250.0);
+    PyObject *init_fn = PyDict_GetItemString(ns, "init");
+    if (!init_fn || !PyCallable_Check(init_fn)) {
         snprintf(err, (size_t)err_size, "smoke test: init() missing");
-        lua_close(L);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
         return false;
     }
-    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        const char *msg = lua_tostring(L, -1);
-        snprintf(err, (size_t)err_size, "smoke test init() error: %s",
-                 msg ? msg : "(unknown error)");
-        lua_close(L);
+    PyObject *cfg = PyObject_CallObject(init_fn, NULL);
+    if (!cfg) {
+        char py_err[480];
+        fetch_py_error(py_err, (int)sizeof(py_err));
+        snprintf(err, (size_t)err_size, "smoke test init() error: %s", py_err);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
         return false;
     }
-    if (lua_type(L, -1) != LUA_TTABLE) {
-        snprintf(err, (size_t)err_size, "smoke test: init() must return a table");
-        lua_close(L);
+    if (!PyDict_Check(cfg)) {
+        snprintf(err, (size_t)err_size, "smoke test: init() must return a dict");
+        Py_DECREF(cfg);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
         return false;
     }
-    lua_pop(L, 1);
+    Py_DECREF(cfg);
 
-    lua_getglobal(L, "think");
-    if (lua_type(L, -1) != LUA_TFUNCTION) {
+    PyObject *think_fn = PyDict_GetItemString(ns, "think");
+    if (!think_fn || !PyCallable_Check(think_fn)) {
         snprintf(err, (size_t)err_size, "smoke test: think() missing");
-        lua_close(L);
+        Py_DECREF(ns);
+        PyGILState_Release(gs);
         return false;
     }
-    lua_pop(L, 1);
 
-    /* Stage 3: 60-frame combat simulation with 4 moving enemies around the
-     * stationary bot. dt = 0.05s, total 3.0 simulated seconds. HP starts
-     * full and drops to a "low" value at the half-way mark so both the
-     * normal-combat and panic/low-HP code paths get exercised. */
+    /* Stage 3: 60-frame combat simulation — hp starts full, drops to 10% halfway */
     smoke_init_arena();
-
-    const int    FRAMES   = 60;
-    const double DT       = 0.05;
-    const double FULL_HP  = 250.0;
+    const int    FRAMES  = 60;
+    const double DT      = 0.05;
+    const double FULL_HP = 250.0;
 
     for (int frame = 0; frame < FRAMES; frame++) {
         smoke_step_enemies(DT);
         double hp = (frame < FRAMES / 2) ? (FULL_HP * 0.95) : (FULL_HP * 0.10);
+        smoke_set_globals(ns, g_smoke.bot_x, g_smoke.bot_z, hp, FULL_HP);
 
-        smoke_set_globals(L, g_smoke.bot_x, g_smoke.bot_z, hp, FULL_HP);
-
-        lua_getglobal(L, "think");
-        if (lua_type(L, -1) != LUA_TFUNCTION) {
+        think_fn = PyDict_GetItemString(ns, "think");
+        if (!think_fn || !PyCallable_Check(think_fn)) {
             snprintf(err, (size_t)err_size,
                      "smoke test: think() vanished at frame %d/%d", frame + 1, FRAMES);
-            lua_close(L);
+            Py_DECREF(ns);
+            PyGILState_Release(gs);
             return false;
         }
-        lua_pushnumber(L, DT);
-        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-            const char *msg = lua_tostring(L, -1);
+        PyObject *ret = PyObject_CallFunction(think_fn, "d", DT);
+        if (!ret) {
+            char py_err[480];
+            fetch_py_error(py_err, (int)sizeof(py_err));
             snprintf(err, (size_t)err_size,
                      "smoke test think() crashed at frame %d/%d: %s",
-                     frame + 1, FRAMES, msg ? msg : "(unknown error)");
-            lua_close(L);
+                     frame + 1, FRAMES, py_err);
+            Py_DECREF(ns);
+            PyGILState_Release(gs);
             return false;
         }
+        Py_DECREF(ret);
     }
 
-    lua_close(L);
+    Py_DECREF(ns);
+    PyGILState_Release(gs);
 
-    /* Stage 4: combat report. */
+    /* Stage 4: combat report */
     if (g_smoke.enemies_targeted_mask == 0) {
         snprintf(err, (size_t)err_size,
                  "smoke test combat report: in 3.0s of simulation with 4 enemies "
@@ -415,22 +436,19 @@ static bool smoke_test_script(const char *path, char *err, int err_size) {
                  "speeds) the script issued %d fire/fire_weapon call(s) but ZERO "
                  "of them were aimed within 30 degrees of ANY enemy. The bot "
                  "will not deal damage. In think(), iterate scan(0) entries, "
-                 "find any with t.team ~= self_team, and call "
-                 "fire(t.x - self_x, t.z - self_z) every frame the enemy is "
+                 "find any with t[\"team\"] != self_team, and call "
+                 "fire(t[\"x\"] - self_x, t[\"z\"] - self_z) every frame the enemy is "
                  "within firing range.",
                  g_smoke.fire_calls_total);
         return false;
     }
 
-    /* Pass — log a one-line summary so the user can see how thoroughly the
-     * script engaged the four cardinal targets. */
     int hit_count = 0;
     for (int i = 0; i < SMOKE_NUM_ENEMIES; i++)
         if (g_smoke.enemies_targeted_mask & (1 << i)) hit_count++;
     llm_bot_log(LLOG_OK,
                 ">> smoke combat: aimed at %d/%d enemies, %d fire calls",
                 hit_count, SMOKE_NUM_ENEMIES, g_smoke.fire_calls_total);
-
     err[0] = '\0';
     return true;
 }
@@ -439,12 +457,10 @@ static bool smoke_test_script(const char *path, char *err, int err_size) {
 static void append_text(char *dst, int dst_size, int *len_io, const char *fmt, ...) {
     int len = *len_io;
     if (len >= dst_size - 1) return;
-
     va_list ap;
     va_start(ap, fmt);
     int wrote = vsnprintf(dst + len, (size_t)(dst_size - len), fmt, ap);
     va_end(ap);
-
     if (wrote < 0) return;
     len += wrote;
     if (len > dst_size - 1) len = dst_size - 1;
@@ -452,83 +468,48 @@ static void append_text(char *dst, int dst_size, int *len_io, const char *fmt, .
 }
 
 /* ----------------------------------------------------------------------- */
-/* Detect patterns in a GENERATED script that we know break at runtime.
- * Returns the first issue as a plain-text hint, or empty if clean. */
+/* Detect patterns in a GENERATED Python script that break at runtime. */
 static void detect_generated_bugs(const char *script, char *hint, int hint_size) {
     hint[0] = '\0';
     if (!script) return;
 
-    if (strstr(script, "math.atan2")) {
+    /* Lua keyword leakage: model emitted Lua instead of Python */
+    if (strstr(script, "\nlocal ") || strncmp(script, "local ", 6) == 0) {
         snprintf(hint, (size_t)hint_size,
-            "Your script uses math.atan2, which does not exist in Lua 5.3+. "
-            "Replace every math.atan2(y, x) with math.atan(y, x).");
+            "Your script contains Lua 'local' variable declarations. "
+            "This is Python, not Lua. Remove all 'local' keywords; "
+            "Python variables are declared by plain assignment: x = 0");
         return;
     }
-    if (strstr(script, "math.hypot")) {
+    /* Lua 'then' keyword */
+    if (strstr(script, " then\n") || strstr(script, " then\r")) {
         snprintf(hint, (size_t)hint_size,
-            "Your script uses math.hypot, which does not exist. "
-            "Replace with math.sqrt(x*x + y*y).");
+            "Your script contains Lua 'then' keywords (if/elseif ... then). "
+            "This is Python. Use 'if condition:' without 'then'.");
         return;
     }
-    /* Table-literal subscript: "}[" after a closing brace that is part of a table
-     * literal is almost always the broken `{...}[key]` pattern. */
-    {
-        const char *p = script;
-        while ((p = strstr(p, "}[")) != NULL) {
-            /* Walk backwards to find the matching '{' and confirm it's a literal,
-             * not a function/body. A function body would have ")" or "end" before. */
-            int depth = 1;
-            const char *q = p - 1;
-            while (q > script && depth > 0) {
-                if (*q == '}') depth++;
-                else if (*q == '{') depth--;
-                if (depth == 0) break;
-                q--;
-            }
-            if (depth == 0 && q > script) {
-                /* Scan left of '{' for non-space; if it's '=' or ',' or '(' or 'return'
-                 * we're subscripting a table literal. */
-                const char *r = q - 1;
-                while (r > script && (*r == ' ' || *r == '\t' || *r == '\n')) r--;
-                if (*r == '=' || *r == ',' || *r == '(' ||
-                    (r >= script + 5 && strncmp(r - 5, "return", 6) == 0)) {
-                    snprintf(hint, (size_t)hint_size,
-                        "Your script subscripts a table literal in one expression "
-                        "(pattern '{...}[key]'). Lua parses this as two statements "
-                        "and crashes. Assign the table to a local first: "
-                        "local T = {...}; local v = T[key].");
-                    return;
-                }
-            }
-            p += 2;
-        }
+    /* self.x instead of self_x */
+    if (strstr(script, "self.x") || strstr(script, "self.z") ||
+        strstr(script, "self.hp") || strstr(script, "self.team")) {
+        snprintf(hint, (size_t)hint_size,
+            "Your script uses 'self.x' / 'self.z' etc. "
+            "These are injected as plain globals: use self_x, self_z, self_hp, self_team.");
+        return;
     }
-    /* init() called at file scope before think definitions run. Typical
-     * telltale: a top-level call "init()" that is NOT inside a function body. */
+    /* API name shadowing: 'scan =' or 'move =' or 'fire =' as assignment */
     {
-        const char *p = script;
-        while ((p = strstr(p, "init()")) != NULL) {
-            /* Skip the definition line. */
-            if (p >= script + 9 && strncmp(p - 9, "function ", 9) == 0) { p += 6; continue; }
-            /* Check whether this occurrence is inside any function by counting
-             * "function" vs "end" tokens before it. */
-            int fn_count = 0, end_count = 0;
-            for (const char *s = script; s < p; s++) {
-                if (strncmp(s, "function", 8) == 0 &&
-                    (s == script || !(s[-1] >= 'a' && s[-1] <= 'z')) &&
-                    !(s[8] >= 'a' && s[8] <= 'z')) fn_count++;
-                if (strncmp(s, "end", 3) == 0 &&
-                    (s == script || !(s[-1] >= 'a' && s[-1] <= 'z')) &&
-                    !(s[3] >= 'a' && s[3] <= 'z')) end_count++;
-            }
-            if (fn_count <= end_count) {
+        const char *shadows[] = {"scan =", "scan=", "move =", "move=", "fire =", "fire=", NULL};
+        for (int i = 0; shadows[i]; i++) {
+            if (strstr(script, shadows[i])) {
                 snprintf(hint, (size_t)hint_size,
-                    "Your script calls init() at file scope (outside any function). "
-                    "Do not call init() yourself -- the engine calls it. "
-                    "Move any data you need out of init() into a plain local table.");
+                    "Your script assigns to the name '%.*s' which shadows the "
+                    "game API function. Use a different variable name, "
+                    "e.g. 'targets = scan(0)' not 'scan = scan(0)'.",
+                    (int)(strchr(shadows[i], ' ') ? strchr(shadows[i], ' ') - shadows[i]
+                                                  : strchr(shadows[i], '=') - shadows[i]),
+                    shadows[i]);
                 return;
             }
-            p += 6;
         }
     }
 }
@@ -537,64 +518,51 @@ static void build_known_bugs(const char *current, char *known_bugs, int size) {
     int kb_len = 0;
     known_bugs[0] = '\0';
 
-    if (strstr(current, "local scan") != NULL) {
+    if (strstr(current, "\nlocal ") || strncmp(current, "local ", 6) == 0) {
+        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
+            "=== CRITICAL BUG: Lua 'local' keyword in Python script ===\n"
+            "Remove all 'local' keywords. Python has no 'local' keyword.\n"
+            "Declare variables with plain assignment: x = 0\n\n");
+    }
+
+    if (strstr(current, "scan =") || strstr(current, "scan=")) {
         kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
             "=== CRITICAL BUG: variable shadows scan() API ===\n"
-            "The script uses `local scan = scan(...)` which SHADOWS the global\n"
-            "scan() API function. Every subsequent call to scan() then fails.\n"
-            "Fix: use a different name, e.g. `local targets = scan(radius)`.\n"
-            "NEVER name a local variable the same as an API function.\n"
-            "\n");
-    }
-
-    if (strstr(current, "math.atan2") != NULL) {
-        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
-            "=== CRITICAL BUG: math.atan2 does not exist in Lua 5.3+ ===\n"
-            "Replace every `math.atan2(y, x)` with `math.atan(y, x)`.\n"
-            "In Lua 5.3+, math.atan accepts two arguments and replaces math.atan2.\n"
-            "\n");
-    }
-
-    if (strstr(current, "math.hypot") != NULL) {
-        kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
-            "=== CRITICAL BUG: math.hypot does not exist in Lua 5.3+ ===\n"
-            "Replace `math.hypot(x, y)` with `math.sqrt(x*x + y*y)`.\n"
-            "Do not call math.hypot in this environment.\n"
-            "\n");
+            "The script assigns to 'scan' which shadows the scan() API function.\n"
+            "Fix: use 'targets = scan(0)' — never name a variable after an API function.\n\n");
     }
 }
 
 static void build_system_prompt(char *dst, int dst_size) {
     snprintf(dst, (size_t)dst_size,
-        "You are iteratively improving a Lua script for an arena combat robot game.\n"
+        "You are iteratively improving a Python script for an arena combat robot game.\n"
         "\n"
-        "=== Game API ===\n"
-        "move(dx, dz)        -- set movement direction; internally normalised; magnitude ignored.\n"
-        "                    -- Do NOT multiply dx/dz by a speed scalar -- pass a unit direction.\n"
-        "fire(dx, dz)        -- aim turret toward (dx,dz) and fire ALL mounted weapons this frame.\n"
-        "                    -- Each weapon has its own cooldown; safe to call every tick.\n"
-        "fire_weapon(i, dx, dz) -- like fire() but only weapon i (1-based index into weapons[]).\n"
-        "scan(radius)        -- radius argument is ignored; returns all bots (LOS) + walls.\n"
-        "                    -- entries: {type=\"bot\",  x, z, distance, team, hp, max_hp}\n"
-        "                                {type=\"wall\", x, z, distance}   (x,z = nearest point)\n"
-        "Per-frame globals:\n"
+        "=== Game API (Python) ===\n"
+        "move(dx, dz)           -- set movement direction; internally normalised; magnitude ignored.\n"
+        "                       -- Do NOT multiply dx/dz by a speed scalar — pass a unit direction.\n"
+        "fire(dx, dz)           -- aim turret toward (dx,dz) and fire ALL mounted weapons this frame.\n"
+        "                       -- Each weapon has its own cooldown; safe to call every tick.\n"
+        "fire_weapon(i, dx, dz) -- like fire() but only weapon i (0-based index into weapons list).\n"
+        "scan(radius)           -- radius argument is ignored; returns all bots (LOS) + walls.\n"
+        "                       -- entries: {\"type\":\"bot\",  \"x\":…, \"z\":…, \"distance\":…, \"team\":…, \"hp\":…, \"max_hp\":…}\n"
+        "                                   {\"type\":\"wall\", \"x\":…, \"z\":…, \"distance\":…}   (x,z = nearest point)\n"
+        "Per-frame globals (injected before every think() call):\n"
         "  self_x, self_z        -- world position\n"
         "  self_team             -- integer script id of this bot's team\n"
         "  self_hp, self_max_hp  -- current and maximum hit points\n"
         "  self_locomotion       -- string: \"wheels\"|\"tracks\"|\"4legs\"|\"2legs\"\n"
         "  self_body             -- string: \"cube\"|\"tall\"|\"flat\"|\"long_low\"|\"tower\"|\"wedge\"|\"tank\"\n"
-        "  self_weapons          -- array of weapon-type strings, 1..4\n"
+        "  self_weapons          -- list of weapon-type strings, 0-based length 1..4\n"
         "  self_weapon_count     -- integer 1..4\n"
         "  self_max_speed        -- current max linear speed in units/second (after weight)\n"
         "\n"
-        "init() must return a table with these fields:\n"
-        "  locomotion = \"wheels\" | \"tracks\" | \"4legs\" | \"2legs\"\n"
-        "  body       = \"cube\" | \"tall\" | \"flat\" | \"long_low\" | \"tower\" | \"wedge\" | \"tank\"\n"
-        "  weapons    = { { type=<W>, mount=<M> }, ... }    -- 1 to 4 entries\n"
+        "init() must return a dict with these fields:\n"
+        "  \"locomotion\": \"wheels\" | \"tracks\" | \"4legs\" | \"2legs\"\n"
+        "  \"body\":       \"cube\" | \"tall\" | \"flat\" | \"long_low\" | \"tower\" | \"wedge\" | \"tank\"\n"
+        "  \"weapons\":    [ { \"type\": <W>, \"mount\": <M> }, ... ]    -- 1 to 4 entries\n"
         "    where <W> is \"MachineGun\" | \"AutoCannon\" | \"Laser\"\n"
         "    and   <M> is \"left\" | \"right\" | \"top\" | \"top_front\" | \"top_rear\" (each unique)\n"
         "Any field may be omitted; defaults are wheels + cube + 2x AutoCannon (left/right).\n"
-        "The legacy `armour` field is no longer used and will be ignored.\n"
         "\n"
         "=== Weapon stats (per projectile) ===\n"
         "                 damage  speed(u/s)  lifetime(s)  fire_interval(s)  weight  turret_turn(rad/s)\n"
@@ -605,7 +573,6 @@ static void build_system_prompt(char *dst, int dst_size) {
         "fire() is engine-rate-limited per weapon: if its cooldown has not elapsed the\n"
         "shot is silently dropped. You can safely call fire() every frame; excess calls\n"
         "cost nothing. But to aim better, still gate fire() on having a target in range.\n"
-        "Turret turn-rate uses the SLOWEST of all mounted weapons' turret_turn values.\n"
         "\n"
         "=== Locomotion stats ===\n"
         "             base_speed  base_turn(rad/s)  lift\n"
@@ -630,7 +597,6 @@ static void build_system_prompt(char *dst, int dst_size) {
         "max_speed = locomotion.base_speed * factor\n"
         "turn_rate = locomotion.base_turn  * factor\n"
         "More/heavier weapons make the bot slower in BOTH translation and rotation.\n"
-        "Pick locomotion + body + weapon mix to fit your strategy.\n"
         "\n"
         "=== Arena & physics ===\n"
         "Arena is a rectangle centred on (0,0) with hard border walls.\n"
@@ -639,49 +605,54 @@ static void build_system_prompt(char *dst, int dst_size) {
         "so the actual shot direction is the CURRENT turret angle, not the requested angle.\n"
         "Projectiles spawn at each weapon's mount point on the turret.\n"
         "\n"
-        "=== Lua 5.4 quirks you keep getting wrong ===\n"
-        "1. math.atan2 does NOT exist. Use math.atan(y, x).\n"
-        "2. math.hypot does NOT exist. Use math.sqrt(x*x + y*y).\n"
-        "3. You cannot subscript a table literal in one expression:\n"
-        "     BAD:  local d = {a=1, b=2}[key]\n"
-        "     GOOD: local T = {a=1, b=2}; local d = T[key]\n"
-        "4. Do NOT call functions at file scope before they are defined later in the file.\n"
-        "   Globals are resolved at call time but the function must exist by then. Safer:\n"
-        "   declare tables/constants at top and functions after, call functions only from think().\n"
-        "5. Every local variable name must differ from API names (move, fire, scan).\n"
-        "     BAD:  local scan = scan(r)\n"
-        "     GOOD: local targets = scan(0)\n"
-        "6. Lua has no continue keyword. Use `goto continue` with a label, or nest an if.\n"
+        "=== Python conventions you must follow ===\n"
+        "1. This is Python, NOT Lua. Do NOT use 'local', 'then', 'end', '#', '--' comments.\n"
+        "   Use Python syntax: assignments, 'if cond:', 'for x in list:', '#' for comments.\n"
+        "2. Module-level mutable variables used inside think() require a 'global' declaration:\n"
+        "     _fire_cd = 0.0                   # module level\n"
+        "     def think(dt):\n"
+        "         global _fire_cd              # required before assigning\n"
+        "         _fire_cd -= dt\n"
+        "   CRITICAL: if a variable is assigned ANYWHERE in a function (even conditionally),\n"
+        "   Python treats it as local throughout that function. Always add it to the\n"
+        "   'global' declaration at the top of think() if you assign to it inside think().\n"
+        "3. Dict access for scan entries: t[\"type\"], t[\"x\"], t[\"z\"], t[\"distance\"], t[\"team\"].\n"
+        "4. Use float('inf') for infinity; len(targets) for length; math.atan2(y, x) for angles.\n"
+        "5. fire_weapon() uses 0-based index: fire_weapon(0, dx, dz) fires the first weapon.\n"
+        "6. Never name a variable the same as an API function:\n"
+        "     BAD:  scan = scan(0)       GOOD: targets = scan(0)\n"
+        "     BAD:  move = (dx, dz)      GOOD: direction = (dx, dz)\n"
+        "7. self_x, self_z, self_hp etc. are plain module globals injected each frame — read\n"
+        "   them directly, never assign to them, no import needed.\n"
+        "8. import math, import random are available; use them freely.\n"
+        "9. NEVER use a local variable with the same name as a module-level variable unless\n"
+        "   you add it to the global declaration. Example of the UnboundLocalError trap:\n"
+        "     BAD:  def think(dt):\n"
+        "               if condition:  _heading = new_val   # assignment makes it local\n"
+        "               move(math.cos(_heading), ...)       # ERROR if condition was False\n"
+        "     GOOD: def think(dt):\n"
+        "               global _heading                     # declare global\n"
+        "               if condition:  _heading = new_val   # now it is a global assignment\n"
+        "               move(math.cos(_heading), ...)       # always reads the global\n"
         "\n"
-        "=== Examples / cookbook block ===\n"
-        "The current script ends with a long comment block titled\n"
-        "  '-- EXAMPLES / COOKBOOK ...'\n"
-        "containing reference patterns (init shape, wall_avoid, nearest_enemy,\n"
-        "fire patterns, range-tiered fire_weapon, common pitfalls). PRESERVE\n"
-        "that whole comment block VERBATIM at the bottom of your output. It is\n"
-        "the working set of patterns for the next iteration; deleting it costs\n"
-        "you context on the next regeneration. Use those examples as the\n"
-        "scaffolding for init()/think(); do not invent new untested patterns.\n"
-        "\n"
-        "=== Smoke-test combat check (this is what we validate post-generation) ===\n"
-        "After generation we run the script in an isolated Lua state with stub\n"
+        "=== Smoke-test combat check (post-generation validation) ===\n"
+        "After generation we run the script in an isolated Python interpreter with stub\n"
         "move/fire/fire_weapon/scan, simulate 3.0 seconds (60 frames at dt=0.05s),\n"
         "and place 4 enemies at distance ~3.5u in the four cardinal directions\n"
-        "(front +x, back -x, left +z, right -z) moving tangentially at varied\n"
-        "speeds. self_hp is full for the first 1.5s and 10%% for the second 1.5s.\n"
+        "(front +x, back -x, left +z, right -z) moving tangentially at varied speeds.\n"
+        "self_hp is full for the first 1.5s and 10%% for the second 1.5s.\n"
         "The script PASSES only if at least ONE fire/fire_weapon call is aimed\n"
         "within 30 degrees of any enemy. To pass with zero ambiguity:\n"
-        "  - in think(), call scan(0)\n"
-        "  - find any entry where t.type=='bot' and t.team ~= self_team\n"
-        "  - call fire(t.x - self_x, t.z - self_z) every frame an enemy is in range\n"
+        "  - in think(), call targets = scan(0)\n"
+        "  - find any entry where t[\"type\"] == \"bot\" and t[\"team\"] != self_team\n"
+        "  - call fire(t[\"x\"] - self_x, t[\"z\"] - self_z) every frame an enemy is in range\n"
         "Also: the smoke test loads the file BEFORE setting any self_* globals,\n"
         "so any file-scope code that reads self_x / self_z / self_team / self_hp\n"
-        "will fail load. Keep file-scope work seedless or use os.time().\n"
+        "will fail load. Keep file-scope code seedless or use time.time().\n"
         "\n"
         "=== Output format ===\n"
-        "Return ONLY the Lua script. No markdown fences, no commentary, no reasoning prose.\n"
-        "The script must define init() returning a table, and think(dt).\n"
-        "Keep the EXAMPLES / COOKBOOK comment block at the bottom verbatim.\n");
+        "Return ONLY the Python script. No markdown fences, no commentary, no reasoning prose.\n"
+        "The script must define init() returning a dict, and think(dt).\n");
 }
 
 typedef struct {
@@ -727,10 +698,10 @@ static void *generate_thread(void *arg) {
     ThreadArgs *ta = (ThreadArgs *)arg;
 
     char *response = (char *)malloc(RESPONSE_BUF_SIZE);
-    char *lua      = (char *)malloc(SCRIPT_BUF_SIZE);
-    if (!response || !lua) {
+    char *python   = (char *)malloc(SCRIPT_BUF_SIZE);
+    if (!response || !python) {
         free(response);
-        free(lua);
+        free(python);
         free(ta);
         goto done;
     }
@@ -762,70 +733,88 @@ static void *generate_thread(void *arg) {
         g_last_bytes_rx = resp_len * 8;
         strncpy(g_last_model, meta.model, sizeof(g_last_model) - 1);
         g_last_model[sizeof(g_last_model) - 1] = '\0';
-        g_last_prompt_tokens = meta.prompt_tokens;
+        g_last_prompt_tokens     = meta.prompt_tokens;
         g_last_completion_tokens = meta.completion_tokens;
-        g_last_total_tokens = meta.total_tokens;
+        g_last_total_tokens      = meta.total_tokens;
         pthread_mutex_unlock(&g_mutex);
         llm_bot_log(LLOG_NORM, "<< response %d chars (try %d/2)", resp_len, attempt);
 
-        extract_lua(response, lua, SCRIPT_BUF_SIZE);
+        extract_python(response, python, SCRIPT_BUF_SIZE);
 
-    char static_hint[480] = "";
-    detect_generated_bugs(lua, static_hint, (int)sizeof(static_hint));
+        /* ----------------------------------------------------------------
+         * Validate the source IN MEMORY before writing to disk.
+         * This prevents a bad script from overwriting a good one and being
+         * loaded by the next match spawn before this thread finishes.
+         * ---------------------------------------------------------------- */
+        char static_hint[480] = "";
+        detect_generated_bugs(python, static_hint, (int)sizeof(static_hint));
 
-        if (!strstr(lua, "function")) {
+        if (!strstr(python, "def ")) {
             snprintf(validation_err, sizeof(validation_err),
-                     "generated response did not contain Lua functions");
+                     "generated response did not contain Python function definitions");
         } else if (static_hint[0] != '\0') {
             snprintf(validation_err, sizeof(validation_err),
                      "static check: %s", static_hint);
-        } else if (write_file(ta->script_path, lua) != 0) {
-            snprintf(validation_err, sizeof(validation_err),
-                     "write failed: %s", ta->script_path);
         } else {
-            llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(lua));
-
-            printf("\n===== GENERATED LUA SCRIPT (%d chars) =====\n%s\n"
-                   "===== END GENERATED SCRIPT =====\n\n",
-                   (int)strlen(lua), lua);
-            fflush(stdout);
-
-            char lua_err[512] = "";
-            bool syntax_ok    = false;
-            lua_State *LS = luaL_newstate();
-            if (LS) {
-                syntax_ok = (luaL_loadfile(LS, ta->script_path) == LUA_OK);
-                if (!syntax_ok) {
-                    const char *msg = lua_tostring(LS, -1);
-                    if (msg) strncpy(lua_err, msg, sizeof(lua_err) - 1);
+            /* Syntax check on the in-memory buffer */
+            char syntax_err[512] = "";
+            bool syntax_ok = false;
+            {
+                PyGILState_STATE gs = PyGILState_Ensure();
+                PyObject *code = Py_CompileString(python, ta->script_path, Py_file_input);
+                if (code) {
+                    syntax_ok = true;
+                    Py_DECREF(code);
+                } else {
+                    PyObject *et = NULL, *ev = NULL, *etb = NULL;
+                    PyErr_Fetch(&et, &ev, &etb);
+                    PyErr_NormalizeException(&et, &ev, &etb);
+                    if (ev) {
+                        PyObject *s = PyObject_Str(ev);
+                        if (s) {
+                            strncpy(syntax_err, PyUnicode_AsUTF8(s),
+                                    sizeof(syntax_err) - 1);
+                            Py_DECREF(s);
+                        }
+                    }
+                    Py_XDECREF(et); Py_XDECREF(ev); Py_XDECREF(etb);
                 }
-                lua_close(LS);
-            } else {
-                syntax_ok = true;
+                PyGILState_Release(gs);
             }
 
             if (!syntax_ok) {
-                snprintf(validation_err, sizeof(validation_err), "%s", lua_err);
-                const char *colon = strrchr(lua_err, ':');
-                llm_bot_log(LLOG_ERR, "!! lua ERR:%s", colon ? colon + 1 : lua_err);
-            } else if (!smoke_test_script(ta->script_path, validation_err,
+                snprintf(validation_err, sizeof(validation_err), "%s", syntax_err);
+                llm_bot_log(LLOG_ERR, "!! syntax ERR: %s", syntax_err);
+            } else if (!smoke_test_source(python, validation_err,
                                           (int)sizeof(validation_err))) {
                 llm_bot_log(LLOG_ERR, "!! smoke test failed");
                 llm_bot_log(LLOG_ERR, "!! %s", validation_err);
             } else {
-                llm_bot_log(LLOG_OK, ">> lua syntax OK");
-                llm_bot_log(LLOG_OK, ">> smoke test OK");
-                pthread_mutex_lock(&g_mutex);
-                g_script_ready = true;
-                strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
-                g_script_color = LLOG_OK;
-                pthread_mutex_unlock(&g_mutex);
-                success = true;
-                break;
+                /* All checks passed — now safe to write to disk */
+                if (write_file(ta->script_path, python) != 0) {
+                    snprintf(validation_err, sizeof(validation_err),
+                             "write failed: %s", ta->script_path);
+                } else {
+                    llm_bot_log(LLOG_OK, ">> syntax OK");
+                    llm_bot_log(LLOG_OK, ">> smoke test OK");
+                    llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(python));
+
+                    printf("\n===== GENERATED PYTHON SCRIPT (%d chars) =====\n%s\n"
+                           "===== END GENERATED SCRIPT =====\n\n",
+                           (int)strlen(python), python);
+                    fflush(stdout);
+
+                    pthread_mutex_lock(&g_mutex);
+                    g_script_ready = true;
+                    strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
+                    g_script_color = LLOG_OK;
+                    pthread_mutex_unlock(&g_mutex);
+                    success = true;
+                }
             }
         }
 
-        if (attempt < 2) {
+        if (!success && attempt < 2) {
             llm_bot_log(LLOG_WARN, "!! validation failed, retrying now");
             retry_user_prompt[0] = '\0';
             int retry_len = 0;
@@ -839,9 +828,7 @@ static void *generate_thread(void *arg) {
                         "Exact error: %s\n", validation_err);
             append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
                         "Do NOT repeat the same construct. Regenerate the FULL script "
-                        "from scratch, applying the Lua quirks rules from the system prompt.\n");
-            /* NOTE: intentionally do NOT include the broken script -- past runs show
-             * the model re-emits the same invalid pattern when it sees it again. */
+                        "from scratch, following the Python rules from the system prompt.\n");
         }
     }
 
@@ -856,7 +843,7 @@ static void *generate_thread(void *arg) {
     }
 
     free(response);
-    free(lua);
+    free(python);
     free(ta);
 
 done:
@@ -948,7 +935,7 @@ void llm_bot_submit_match(const MatchStats *s) {
         return;
     }
     if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
-        snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
+        snprintf(current, SCRIPT_BUF_SIZE, "# (script not found)\n");
 
     /* Push new match into rolling history */
     if (g_match_history_count < MATCH_HISTORY_SIZE) {
@@ -959,29 +946,25 @@ void llm_bot_submit_match(const MatchStats *s) {
         g_match_history[MATCH_HISTORY_SIZE - 1] = *s;
     }
 
-    /* Error section: load-time errors take priority; runtime errors otherwise */
+    /* Error section */
     char error_section[1024] = "";
     if (s->script_error[0] != '\0') {
         snprintf(error_section, sizeof(error_section),
             "=== SCRIPT ERROR — fix this before anything else! ===\n"
-            "Lua error: %s\n"
-            "The bots had no AI this match because the script would not load.\n"
-            "\n",
+            "Python error: %s\n"
+            "The bots had no AI this match because the script would not load.\n\n",
             s->script_error);
     } else if (s->runtime_error[0] != '\0') {
         snprintf(error_section, sizeof(error_section),
             "=== RUNTIME ERROR — fix this! ===\n"
-            "Lua error: %s\n"
-            "The script loaded but crashed every frame during play, so bots did nothing.\n"
-            "\n",
+            "Python error: %s\n"
+            "The script loaded but crashed every frame during play, so bots did nothing.\n\n",
             s->runtime_error);
     }
 
-    /* Known bugs detected by static analysis of the current script */
     char known_bugs[2048] = "";
     build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
 
-    /* Build compact match-history section (last 1-3 matches) */
     char history_section[2048] = "";
     int  hs_len = 0;
     hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
@@ -1019,12 +1002,12 @@ void llm_bot_submit_match(const MatchStats *s) {
 
     snprintf(ta->user_prompt, sizeof(ta->user_prompt),
         "%s%s%s"
-        "%s"   /* known_bugs */
-        "%s"   /* error_section */
+        "%s"
+        "%s"
         "=== Current script ===\n"
         "%s\n"
         "\n"
-        "%s"   /* history_section */
+        "%s"
         "\n"
         "Improve the script using the system rules above.\n",
         g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
@@ -1078,7 +1061,7 @@ void llm_bot_request_initial(int total_matches) {
         return;
     }
     if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
-        snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
+        snprintf(current, SCRIPT_BUF_SIZE, "# (script not found)\n");
 
     char known_bugs[2048] = "";
     build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
@@ -1138,7 +1121,7 @@ void llm_bot_request_prompt_refresh(int total_matches) {
         return;
     }
     if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
-        snprintf(current, SCRIPT_BUF_SIZE, "-- (script not found)\n");
+        snprintf(current, SCRIPT_BUF_SIZE, "# (script not found)\n");
 
     char known_bugs[2048] = "";
     build_known_bugs(current, known_bugs, (int)sizeof(known_bugs));
