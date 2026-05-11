@@ -50,7 +50,7 @@ def think(dt):
 
     enemy, min_dist = None, float("inf")
     for t in targets:
-        if t["type"] == "bot" and t["team"] == 6 and t["distance"] < min_dist:
+        if t["type"] == "bot" and t["team"] != self_team and t["distance"] < min_dist:
             min_dist = t["distance"]
             enemy = t
 

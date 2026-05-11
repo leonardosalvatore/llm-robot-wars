@@ -1,34 +1,34 @@
-# big_robot_autocannon.py — "titan-auto": big tank with autocannons
 import math
+import random
+
 
 def init():
     return {
         "locomotion": "wheels",
-        "body": "tank",
+        "body": "cube",
         "weapons": [
-            {"type": "AutoCannon", "mount": "left"},
+            {"type": "MachineGun", "mount": "left"},
             {"type": "AutoCannon", "mount": "right"},
         ],
     }
 
-# Turret turn rate for autocannon (4 rad/s per spec)
-_TURRET_TURN = 4.0
+
+_move_angle = random.uniform(0, math.pi * 2)
+_move_timer = 0.0
+
 
 def think(dt):
+    global _move_angle, _move_timer
+
+    _move_timer -= dt
+    if _move_timer <= 0.0:
+        _move_angle = random.uniform(0, math.pi * 2)
+        _move_timer = 1.0
+
+    move(math.cos(_move_angle), math.sin(_move_angle))
+
     targets = scan(0)
-
-    best_target = None
-    best_dist = float("inf")
-
     for t in targets:
         if t["type"] == "bot" and t["team"] != self_team:
-            d = t["distance"]
-            if d < best_dist:
-                best_dist = d
-                best_target = t
-
-    if best_target:
-        dx = best_target["x"] - self_x
-        dz = best_target["z"] - self_z
-        # fire both autocannons every frame; engine limits by cooldown
-        fire(dx, dz)
+            fire(t["x"] - self_x, t["z"] - self_z)
+            break

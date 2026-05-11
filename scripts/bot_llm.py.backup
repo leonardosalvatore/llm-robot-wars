@@ -1,10 +1,5 @@
-# bot_llm.py — "wall-bumper": wander in a fixed direction; whenever the
-# bot stalls against a wall (or sees one very close) pick a new random heading.
-# Dual AutoCannon; fires only at the nearest visible enemy.
-
 import math
 import random
-import time
 
 
 def init():
@@ -12,62 +7,28 @@ def init():
         "locomotion": "wheels",
         "body": "cube",
         "weapons": [
-            {"type": "AutoCannon", "mount": "left"},
+            {"type": "MachineGun", "mount": "left"},
             {"type": "AutoCannon", "mount": "right"},
         ],
     }
 
 
-_heading = random.uniform(0, math.pi * 2)
-_prev_x = None
-_prev_z = None
-_stall_time = 0.0
-_SCAN_RADIUS = 12.0
-_STALL_SECS = 0.25
-
-
-def _pick_new_heading(avoid_dx=None, avoid_dz=None):
-    global _heading
-    base = random.uniform(0, math.pi * 2)
-    if avoid_dx is not None and avoid_dz is not None:
-        away = math.atan2(avoid_dz, avoid_dx)
-        if random.random() < 0.6:
-            base = away + (random.random() - 0.5) * (math.pi * 0.5)
-    _heading = base
+_move_angle = random.uniform(0, math.pi * 2)
+_move_timer = 0.0
 
 
 def think(dt):
-    global _heading, _prev_x, _prev_z, _stall_time
+    global _move_angle, _move_timer
 
-    if _prev_x is not None:
-        dx = self_x - _prev_x
-        dz = self_z - _prev_z
-        if (dx * dx + dz * dz) < (0.02 * 0.02):
-            _stall_time += dt
-        else:
-            _stall_time = 0.0
-    _prev_x, _prev_z = self_x, self_z
+    _move_timer -= dt
+    if _move_timer <= 0.0:
+        _move_angle = random.uniform(0, math.pi * 2)
+        _move_timer = 1.0
 
-    targets = scan(_SCAN_RADIUS)
+    move(math.cos(_move_angle), math.sin(_move_angle))
 
-    wall_dx, wall_dz, wall_dist = None, None, float("inf")
-    enemy, enemy_dist = None, float("inf")
+    targets = scan(0)
     for t in targets:
-        if t["type"] == "wall":
-            if t["distance"] < wall_dist:
-                wall_dist = t["distance"]
-                wall_dx = self_x - t["x"]
-                wall_dz = self_z - t["z"]
-        elif t["type"] == "bot" and t["team"] != self_team:
-            if t["distance"] < enemy_dist:
-                enemy_dist = t["distance"]
-                enemy = t
-
-    if _stall_time >= _STALL_SECS or wall_dist < 1.5:
-        _pick_new_heading(wall_dx, wall_dz)
-        _stall_time = 0.0
-
-    move(math.cos(_heading), math.sin(_heading))
-
-    if enemy:
-        fire(enemy["x"] - self_x, enemy["z"] - self_z)
+        if t["type"] == "bot" and t["team"] != self_team:
+            fire(t["x"] - self_x, t["z"] - self_z)
+            break
