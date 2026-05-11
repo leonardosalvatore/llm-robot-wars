@@ -10,8 +10,8 @@
 /* -----------------------------------------------------------------------
  * Capacities
  * ----------------------------------------------------------------------- */
-#define FX_MAX_PARTICLES 512
-#define FX_MAX_RINGS      64
+#define FX_MAX_PARTICLES 1024
+#define FX_MAX_RINGS      128
 
 /* -----------------------------------------------------------------------
  * Data
@@ -157,32 +157,32 @@ void fx_draw(void) {
  * Impact — projectile hits a bot
  * ----------------------------------------------------------------------- */
 void fx_impact(float x, float y, float z, Color col) {
-    /* 8 sparks that fly outward and upward */
-    for (int i = 0; i < 8; i++) {
+    /* 14 sparks that fly outward and upward */
+    for (int i = 0; i < 14; i++) {
         FxParticle *p = alloc_particle();
         if (!p) break;
         float angle = randf(0, 2.0f * 3.14159265f);
-        float speed = randf(1.2f, 3.5f);
+        float speed = randf(2.0f, 5.5f);
         p->pos     = (Vector3){x, y, z};
-        p->vel     = (Vector3){cosf(angle)*speed, randf(0.4f,1.8f), sinf(angle)*speed};
+        p->vel     = (Vector3){cosf(angle)*speed, randf(0.8f, 3.0f), sinf(angle)*speed};
         p->color   = (Color){
             (unsigned char)((col.r + 255) / 2),
             (unsigned char)((col.g + 200) / 2),
             50, 255 };
-        p->max_life = randf(0.18f, 0.35f);
+        p->max_life = randf(0.25f, 0.50f);
         p->life     = p->max_life;
-        p->size     = randf(0.025f, 0.055f);
+        p->size     = randf(0.05f, 0.10f);
         p->active   = 1;
     }
 
-    /* Small expanding ring at ground level */
+    /* Expanding ring at ground level */
     FxRing *r = alloc_ring();
     if (r) {
         r->center      = (Vector3){x, 0.04f, z};
         r->color       = (Color){col.r, col.g, col.b, 220};
-        r->radius      = 0.04f;
-        r->expand_rate = 2.5f;
-        r->max_life    = 0.14f;
+        r->radius      = 0.08f;
+        r->expand_rate = 5.0f;
+        r->max_life    = 0.22f;
         r->life        = r->max_life;
         r->active      = 1;
     }
@@ -192,20 +192,20 @@ void fx_impact(float x, float y, float z, Color col) {
  * Explosion — bot is destroyed
  * ----------------------------------------------------------------------- */
 void fx_explosion(float x, float z) {
-    float y0 = 0.25f;
+    float y0 = 0.35f;
 
-    /* 40 debris particles */
-    for (int i = 0; i < 40; i++) {
+    /* 60 debris particles */
+    for (int i = 0; i < 60; i++) {
         FxParticle *p = alloc_particle();
         if (!p) break;
         float angle = randf(0, 2.0f * 3.14159265f);
-        float speed = randf(2.5f, 10.0f);
+        float speed = randf(4.0f, 16.0f);
         p->pos     = (Vector3){x, y0, z};
-        p->vel     = (Vector3){cosf(angle)*speed, randf(2.0f,7.0f), sinf(angle)*speed};
+        p->vel     = (Vector3){cosf(angle)*speed, randf(3.0f, 10.0f), sinf(angle)*speed};
         p->color   = g_colors.explosion[rand() % 5];
-        p->max_life = randf(0.6f, 1.2f);
+        p->max_life = randf(0.8f, 1.6f);
         p->life     = p->max_life;
-        p->size     = randf(0.06f, 0.18f);
+        p->size     = randf(0.10f, 0.30f);
         p->active   = 1;
     }
 
@@ -214,9 +214,9 @@ void fx_explosion(float x, float z) {
     if (r) {
         r->center      = (Vector3){x, 0.04f, z};
         r->color       = g_colors.explosion_ring;
-        r->radius      = 0.25f;
-        r->expand_rate = 7.0f;
-        r->max_life    = 0.5f;
+        r->radius      = 0.4f;
+        r->expand_rate = 12.0f;
+        r->max_life    = 0.65f;
         r->life        = r->max_life;
         r->active      = 1;
     }
@@ -227,9 +227,9 @@ void fx_explosion(float x, float z) {
         flash->pos     = (Vector3){x, y0, z};
         flash->vel     = (Vector3){0, 0, 0};
         flash->color   = g_colors.explosion_flash;
-        flash->max_life = 0.18f;
+        flash->max_life = 0.28f;
         flash->life    = flash->max_life;
-        flash->size    = 0.55f;
+        flash->size    = 1.0f;
         flash->active  = 1;
     }
 

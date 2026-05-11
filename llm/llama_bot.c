@@ -50,6 +50,9 @@ static int        g_match_history_count = 0;
 static bool       g_pending_match_valid = false;
 static MatchStats g_pending_match;
 
+/* Stagnation tracking — how many consecutive generations produced no change */
+static int  g_stagnation_count = 0;
+
 /* ----------------------------------------------------------------------- */
 static int read_file(const char *path, char *buf, int buf_size) {
     FILE *f = fopen(path, "r");
@@ -67,6 +70,13 @@ static int write_file(const char *path, const char *content) {
     fputs(content, f);
     fclose(f);
     return 0;
+}
+
+/* FNV-1a 32-bit hash of a string — good enough for stagnation detection */
+static unsigned int fnv1a(const char *s) {
+    unsigned int h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -790,26 +800,55 @@ static void *generate_thread(void *arg) {
                 llm_bot_log(LLOG_ERR, "!! smoke test failed");
                 llm_bot_log(LLOG_ERR, "!! %s", validation_err);
             } else {
-                /* All checks passed — now safe to write to disk */
-                if (write_file(ta->script_path, python) != 0) {
-                    snprintf(validation_err, sizeof(validation_err),
-                             "write failed: %s", ta->script_path);
-                } else {
-                    llm_bot_log(LLOG_OK, ">> syntax OK");
-                    llm_bot_log(LLOG_OK, ">> smoke test OK");
-                    llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(python));
+                /* All checks passed — check for stagnation (identical to current script) */
+                char current_on_disk[SCRIPT_BUF_SIZE];
+                bool is_stagnant = false;
+                if (read_file(ta->script_path, current_on_disk, SCRIPT_BUF_SIZE) > 0
+                    && strcmp(python, current_on_disk) == 0) {
+                    is_stagnant = true;
+                }
 
-                    printf("\n===== GENERATED PYTHON SCRIPT (%d chars) =====\n%s\n"
-                           "===== END GENERATED SCRIPT =====\n\n",
-                           (int)strlen(python), python);
-                    fflush(stdout);
-
+                if (is_stagnant && attempt < 2) {
+                    /* Don't write — force a retry with an explicit change demand */
                     pthread_mutex_lock(&g_mutex);
-                    g_script_ready = true;
-                    strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
-                    g_script_color = LLOG_OK;
+                    g_stagnation_count++;
                     pthread_mutex_unlock(&g_mutex);
-                    success = true;
+                    llm_bot_log(LLOG_WARN,
+                                "!! stagnation #%d: generated script is identical to current — forcing retry",
+                                g_stagnation_count);
+                    snprintf(validation_err, sizeof(validation_err),
+                             "stagnation: you generated the EXACT same script as the one already running. "
+                             "You MUST make a genuinely different strategy. "
+                             "Try a completely different movement pattern, firing logic, or body configuration.");
+                } else {
+                    /* Write to disk (even if stagnant on last attempt — better than nothing) */
+                    if (write_file(ta->script_path, python) != 0) {
+                        snprintf(validation_err, sizeof(validation_err),
+                                 "write failed: %s", ta->script_path);
+                    } else {
+                        llm_bot_log(LLOG_OK, ">> syntax OK");
+                        llm_bot_log(LLOG_OK, ">> smoke test OK");
+                        if (is_stagnant) {
+                            llm_bot_log(LLOG_WARN, ">> script unchanged after retry — keeping");
+                        } else {
+                            llm_bot_log(LLOG_OK, ">> script written (%d chars)", (int)strlen(python));
+                            pthread_mutex_lock(&g_mutex);
+                            g_stagnation_count = 0;
+                            pthread_mutex_unlock(&g_mutex);
+                        }
+
+                        printf("\n===== GENERATED PYTHON SCRIPT (%d chars) =====\n%s\n"
+                               "===== END GENERATED SCRIPT =====\n\n",
+                               (int)strlen(python), python);
+                        fflush(stdout);
+
+                        pthread_mutex_lock(&g_mutex);
+                        g_script_ready = true;
+                        strncpy(g_script_status, "OK", sizeof(g_script_status) - 1);
+                        g_script_color = LLOG_OK;
+                        pthread_mutex_unlock(&g_mutex);
+                        success = true;
+                    }
                 }
             }
         }
@@ -1000,8 +1039,23 @@ void llm_bot_submit_match(const MatchStats *s) {
 
     build_system_prompt(ta->system_prompt, (int)sizeof(ta->system_prompt));
 
+    /* Stagnation note: included when the model keeps regenerating the same script */
+    char stagnation_note[512] = "";
+    int stag = g_stagnation_count;
+    if (stag >= 1) {
+        snprintf(stagnation_note, sizeof(stagnation_note),
+            "=== STAGNATION WARNING (repeat #%d) ===\n"
+            "The last %d generation(s) produced a script IDENTICAL to what is already "
+            "running. The score metrics in the match history below show the limits of "
+            "the current approach. You MUST produce a genuinely different strategy: "
+            "change the movement pattern, locomotion type, body, weapon choice, or "
+            "firing logic in a meaningful way. Do NOT return the same code.\n\n",
+            stag, stag);
+    }
+
     snprintf(ta->user_prompt, sizeof(ta->user_prompt),
         "%s%s%s"
+        "%s"
         "%s"
         "%s"
         "=== Current script ===\n"
@@ -1013,6 +1067,7 @@ void llm_bot_submit_match(const MatchStats *s) {
         g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
         g_user_prompt[0] != '\0' ? g_user_prompt : "",
         g_user_prompt[0] != '\0' ? "\n\n" : "",
+        stagnation_note,
         known_bugs,
         error_section,
         current,

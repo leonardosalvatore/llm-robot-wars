@@ -852,6 +852,13 @@ static void draw_wall_tapered_wires(float cx, float cy, float cz,
     float yt  = cy + wh * 0.5f;
     float yb  = cy - wh * 0.5f;
 
+    /* Expand all corners by a tiny epsilon so the wire sits fractionally
+     * in front of the solid fill, eliminating Z-fighting. */
+    const float e = 0.012f;
+    htw += e;  htd += e;
+    hbw += e;  hbd += e;
+    yt  += e;  yb  -= e;
+
     /* 8 corners: t=top, b=bottom; order: front-left, front-right, back-right, back-left */
     Vector3 tf = {cx - htw, yt, cz + htd};
     Vector3 tr = {cx + htw, yt, cz + htd};
@@ -1422,8 +1429,7 @@ int main(void) {
         .projection = CAMERA_PERSPECTIVE
     };
     Camera3D *camera = &cam_ortho;
-    bool llm_prompt_modal = gcfg.use_llm && start_with_custom_prompt;
-    bool llm_initial_prompt_pending = gcfg.use_llm && start_with_custom_prompt;
+    bool prompt_focused = false;
     char llm_prompt_buffer[sizeof(gcfg.llm_user_prompt)];
     strncpy(llm_prompt_buffer, gcfg.llm_user_prompt, sizeof(llm_prompt_buffer) - 1);
     llm_prompt_buffer[sizeof(llm_prompt_buffer) - 1] = '\0';
@@ -1432,8 +1438,7 @@ int main(void) {
         llm_bot_init(gcfg.llm_host, gcfg.llm_port,
                      script_paths[LLM_SCRIPT_IDX],
                      gcfg.llm_user_prompt);
-        if (!start_with_custom_prompt)
-            llm_bot_request_initial(gcfg.num_matches);
+        llm_bot_request_initial(gcfg.num_matches);
     }
 
     int  match_idx  = 0;
@@ -1465,40 +1470,39 @@ int main(void) {
         /* -------------------------------------------------------------- */
         while (!WindowShouldClose() && !match_over) {
             float dt = GetFrameTime();
-            if (!llm_prompt_modal) {
-                match_time += dt;
-            }
+            match_time += dt;
 
-            if (gcfg.use_llm && !llm_prompt_modal && IsKeyPressed(KEY_N)) {
-                strncpy(llm_prompt_buffer, gcfg.llm_user_prompt, sizeof(llm_prompt_buffer) - 1);
-                llm_prompt_buffer[sizeof(llm_prompt_buffer) - 1] = '\0';
-                llm_prompt_modal = true;
-            }
-
-            if (llm_prompt_modal) {
-                bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-                bool apply_prompt = IsKeyPressed(KEY_ENTER) && !shift_down;
-                if (apply_prompt) {
-                    strncpy(gcfg.llm_user_prompt, llm_prompt_buffer, sizeof(gcfg.llm_user_prompt) - 1);
-                    gcfg.llm_user_prompt[sizeof(gcfg.llm_user_prompt) - 1] = '\0';
-                    config_save(&gcfg, CFG_PATH);
-                    llm_bot_set_user_prompt(gcfg.llm_user_prompt);
-                    if (llm_initial_prompt_pending) {
-                        llm_bot_request_initial(gcfg.num_matches);
-                        llm_initial_prompt_pending = false;
-                    } else {
+            /* Prompt bar: click inside to focus, Enter to send, Esc to unfocus */
+            if (gcfg.use_llm) {
+                int sw = GetRenderWidth();
+                int sh = GetRenderHeight();
+                const int PBAR_H = 60;
+                Rectangle bar_rect = {0, (float)(sh - PBAR_H), (float)sw, (float)PBAR_H};
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    Vector2 mp = GetMousePosition();
+                    prompt_focused = CheckCollisionPointRec(mp, bar_rect);
+                }
+                if (prompt_focused) {
+                    bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+                    if (IsKeyPressed(KEY_ENTER) && !shift_down) {
+                        strncpy(gcfg.llm_user_prompt, llm_prompt_buffer,
+                                sizeof(gcfg.llm_user_prompt) - 1);
+                        gcfg.llm_user_prompt[sizeof(gcfg.llm_user_prompt) - 1] = '\0';
+                        config_save(&gcfg, CFG_PATH);
+                        llm_bot_set_user_prompt(gcfg.llm_user_prompt);
                         llm_bot_request_prompt_refresh(gcfg.num_matches);
+                        prompt_focused = false;
                     }
-                    llm_prompt_modal = false;
-                }
-                if (IsKeyPressed(KEY_ESCAPE)) {
-                    if (llm_initial_prompt_pending) {
-                        llm_bot_request_initial(gcfg.num_matches);
-                        llm_initial_prompt_pending = false;
+                    if (IsKeyPressed(KEY_ESCAPE)) {
+                        strncpy(llm_prompt_buffer, gcfg.llm_user_prompt,
+                                sizeof(llm_prompt_buffer) - 1);
+                        llm_prompt_buffer[sizeof(llm_prompt_buffer) - 1] = '\0';
+                        prompt_focused = false;
                     }
-                    llm_prompt_modal = false;
                 }
-            } else {
+            }
+
+            if (!prompt_focused) {
                 /* Camera controls */
                 Vector3 pan_forward, pan_right;
                 camera_ground_basis(camera, &pan_forward, &pan_right);
@@ -1536,8 +1540,20 @@ int main(void) {
                 if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
                 if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
                 if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
+                if (IsKeyPressed(KEY_I)) {
+                    if (camera->projection == CAMERA_PERSPECTIVE) {
+                        camera->projection = CAMERA_ORTHOGRAPHIC;
+                        float dist = Vector3Distance(camera->position, camera->target);
+                        camera->fovy = dist * tanf(DEG2RAD * camera->fovy * 0.5f) * 2.0f;
+                    } else {
+                        camera->projection = CAMERA_PERSPECTIVE;
+                        camera->fovy = 50.0f;
+                    }
+                }
+            }
 
-                /* Simulation tick */
+            /* Simulation tick — always runs */
+            if (!match_over) {
                 update_scripts(g_bots, g_bot_count, dt);
                 update_inertia(g_bots, g_bot_count, dt);
                 update_movement(g_bots, g_bot_count, dt);
@@ -1709,28 +1725,17 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  N prompt  T scan  F full  R restart  ESC quit"
+                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  T scan  F full  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  T scan  F full  R restart  ESC quit";
+                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  T scan  F full  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 int hud_top = 34;
                 if (gcfg.use_llm) {
                     LlmVisState hud_vis;
                     llm_bot_get_vis_state(&hud_vis);
-                    char prompt_preview[96];
-                    int pi = 0;
-                    const char *src = gcfg.llm_user_prompt[0] ? gcfg.llm_user_prompt : "(no custom prompt)";
-                    for (int i = 0; src[i] != '\0' && pi < (int)sizeof(prompt_preview) - 1; i++) {
-                        char c = src[i];
-                        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-                        prompt_preview[pi++] = c;
-                    }
-                    prompt_preview[pi] = '\0';
-                    DrawText(TextFormat("Prompt: %.82s", prompt_preview),
-                             10, 34, 20, LIGHTGRAY);
 
                     char model_line[192];
                     snprintf(model_line, sizeof(model_line),
@@ -1739,8 +1744,8 @@ int main(void) {
                              hud_vis.prompt_tokens,
                              hud_vis.completion_tokens,
                              hud_vis.total_tokens);
-                    DrawText(model_line, 10, 56, 20, GRAY);
-                    hud_top = 78;
+                    DrawText(model_line, 10, 34, 20, GRAY);
+                    hud_top = 56;
                 }
 
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
@@ -1764,32 +1769,40 @@ int main(void) {
                     llm_bot_get_vis_state(&vis);
                     draw_llm_panel(&vis, match_idx, gcfg.num_matches,
                                     match_time, (float)gcfg.match_duration);
-                }
 
-                if (llm_prompt_modal) {
-                    int ow = GetRenderWidth();
-                    int oh = GetRenderHeight();
-                    Rectangle panel = {(float)(ow / 2 - 760), (float)(oh / 2 - 160), 1520.0f, 320.0f};
-                    DrawRectangle(0, 0, ow, oh, (Color){0, 0, 0, 150});
-                    DrawRectangleRec(panel, (Color){18, 20, 28, 245});
-                    DrawRectangleLinesEx(panel, 2.0f, SKYBLUE);
-                    DrawText("Edit LLM User Prompt", (int)panel.x + 16, (int)panel.y + 12, 28, RAYWHITE);
-                    if (llm_initial_prompt_pending) {
-                        DrawText("Press Enter to apply and start the first generation. Shift+Enter adds a new line. ESC keeps current prompt and starts anyway.",
-                                 (int)panel.x + 16, (int)panel.y + 46, 20, LIGHTGRAY);
-                    } else {
-                        DrawText("Press Enter to apply and regenerate. Shift+Enter adds a new line. ESC to cancel.",
-                                 (int)panel.x + 16, (int)panel.y + 46, 20, LIGHTGRAY);
-                    }
-                    draw_multiline_prompt_box(
-                        (Rectangle){panel.x + 16, panel.y + 80, panel.width - 32, panel.height - 96},
-                        llm_prompt_buffer, (int)sizeof(llm_prompt_buffer), true, 9, true);
+                    /* Persistent prompt bar at the bottom */
+                    int sw = GetRenderWidth();
+                    int sh = GetRenderHeight();
+                    const int PBAR_H   = 60;
+                    const int LABEL_W  = 72;
+                    const int HINT_W   = 360;
+
+                    Color bar_bg     = prompt_focused
+                                       ? (Color){28, 34, 46, 235}
+                                       : (Color){16, 18, 26, 210};
+                    Color bar_border = prompt_focused ? SKYBLUE : (Color){70, 75, 95, 255};
+
+                    DrawRectangle(0, sh - PBAR_H, sw, PBAR_H, bar_bg);
+                    DrawLine(0, sh - PBAR_H, sw, sh - PBAR_H, bar_border);
+
+                    DrawText("Prompt:", 10, sh - PBAR_H + (PBAR_H - 20) / 2, 20,
+                             prompt_focused ? SKYBLUE : LIGHTGRAY);
+
+                    const char *hint = prompt_focused
+                        ? "Enter=send  Shift+Enter=newline  Esc=cancel"
+                        : "Click to edit  Enter=send";
+                    DrawText(hint, sw - HINT_W, sh - PBAR_H + (PBAR_H - 18) / 2, 18,
+                             prompt_focused ? (Color){120, 160, 200, 255} : DARKGRAY);
+
+                    Rectangle text_rect = {(float)(LABEL_W), (float)(sh - PBAR_H + 4),
+                                           (float)(sw - LABEL_W - HINT_W - 8),
+                                           (float)(PBAR_H - 8)};
+                    draw_multiline_prompt_box(text_rect, llm_prompt_buffer,
+                                             (int)sizeof(llm_prompt_buffer),
+                                             prompt_focused, 2, true);
                 }
 
             EndDrawing();
-
-            if (llm_prompt_modal)
-                continue;
 
             /* Check match-end conditions */
             {
