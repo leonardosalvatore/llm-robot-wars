@@ -1703,27 +1703,42 @@ int main(void) {
                         }
                     }
 
-                    /* Projectiles */
+                    /* Projectiles.
+                     * NOTE: rlSetLineWidth() only calls glLineWidth(); it does
+                     * NOT flush the deferred line batch. DrawLine3D vertices are
+                     * batched and the width in effect at FLUSH time applies to
+                     * every line in the batch. So we must flush the pending
+                     * lines (grid/walls) BEFORE widening, draw all laser lines
+                     * in one widened pass, then flush again and restore width —
+                     * otherwise the thick laser width leaks onto the grid and
+                     * the whole wireframe renders bold whenever lasers fire. */
+                    float py = CUBE_SIZE * 0.3f;
+
+                    /* Pass 1: thick laser lines, width-scoped via explicit flushes */
+                    rlDrawRenderBatchActive();   /* flush grid/walls at width 1.0 */
+                    rlSetLineWidth(2.0f);
                     for (int i = 0; i < g_proj_count; i++) {
                         Proj *p = &g_projs[i];
-                        if (!p->active) continue;
-                        float py = CUBE_SIZE * 0.3f;
-                        if (p->weapon_type == WEAPON_LASER) {
-                            float half = 0.80f;
-                            rlSetLineWidth(4.0f);
-                            DrawLine3D(
-                                (Vector3){p->x - p->dir_x * half, py,
-                                          p->z - p->dir_z * half},
-                                (Vector3){p->x + p->dir_x * half, py,
-                                          p->z + p->dir_z * half},
-                                g_colors.laser);
-                            rlSetLineWidth(1.0f);
-                        } else {
-                            Color col = {p->r, p->g, p->b, p->a};
-                            DrawBillboard(*camera, default_billboard_texture(),
-                                          (Vector3){p->x, py, p->z},
-                                          CUBE_SIZE * 0.36f, col);
-                        }
+                        if (!p->active || p->weapon_type != WEAPON_LASER) continue;
+                        float half = 0.80f;
+                        DrawLine3D(
+                            (Vector3){p->x - p->dir_x * half, py,
+                                      p->z - p->dir_z * half},
+                            (Vector3){p->x + p->dir_x * half, py,
+                                      p->z + p->dir_z * half},
+                            g_colors.laser);
+                    }
+                    rlDrawRenderBatchActive();   /* flush lasers while width is 2.0 */
+                    rlSetLineWidth(1.0f);
+
+                    /* Pass 2: non-laser projectiles as billboards */
+                    for (int i = 0; i < g_proj_count; i++) {
+                        Proj *p = &g_projs[i];
+                        if (!p->active || p->weapon_type == WEAPON_LASER) continue;
+                        Color col = {p->r, p->g, p->b, p->a};
+                        DrawBillboard(*camera, default_billboard_texture(),
+                                      (Vector3){p->x, py, p->z},
+                                      CUBE_SIZE * 0.36f, col);
                     }
 
                     fx_draw();
