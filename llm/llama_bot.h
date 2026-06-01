@@ -63,9 +63,13 @@ typedef struct {
 void llm_bot_init(const char *host, int port, const char *script_path,
                   const char *user_prompt);
 void llm_bot_set_user_prompt(const char *user_prompt);
-void llm_bot_request_initial(int total_matches);
-void llm_bot_request_prompt_refresh(int total_matches);
+void llm_bot_request_initial(void);
+void llm_bot_request_prompt_refresh(void);
 void llm_bot_submit_match(const MatchStats *stats);
+/* Trigger a background regeneration that builds on the most recent telemetry
+ * snapshot without recording a new history entry. Used for continuous,
+ * back-to-back self-improvement between deploys. No-op if busy or no history. */
+void llm_bot_request_continue(void);
 bool llm_bot_poll_ready(void);
 bool llm_bot_poll_gen_error(char *buf, int size);
 bool llm_bot_is_busy(void);

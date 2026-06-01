@@ -1016,18 +1016,21 @@ void llm_bot_set_user_prompt(const char *user_prompt) {
     pthread_mutex_unlock(&g_mutex);
 }
 
-void llm_bot_submit_match(const MatchStats *s) {
+static void start_generation(const MatchStats *s, bool push_history,
+                             bool queue_if_busy) {
     pthread_mutex_lock(&g_mutex);
     bool busy = g_thread_busy;
     if (!busy) g_thread_busy = true;
     pthread_mutex_unlock(&g_mutex);
 
     if (busy) {
-        pthread_mutex_lock(&g_mutex);
-        g_pending_match       = *s;
-        g_pending_match_valid = true;
-        pthread_mutex_unlock(&g_mutex);
-        llm_bot_log(LLOG_WARN, "!! gen busy, queued match %d", s->match_number);
+        if (queue_if_busy) {
+            pthread_mutex_lock(&g_mutex);
+            g_pending_match       = *s;
+            g_pending_match_valid = true;
+            pthread_mutex_unlock(&g_mutex);
+            llm_bot_log(LLOG_WARN, "!! gen busy, queued gen %d", s->match_number);
+        }
         return;
     }
 
@@ -1054,13 +1057,15 @@ void llm_bot_submit_match(const MatchStats *s) {
     if (read_file(g_script_path, current, SCRIPT_BUF_SIZE) <= 0)
         snprintf(current, SCRIPT_BUF_SIZE, "# (script not found)\n");
 
-    /* Push new match into rolling history */
-    if (g_match_history_count < MATCH_HISTORY_SIZE) {
-        g_match_history[g_match_history_count++] = *s;
-    } else {
-        memmove(g_match_history, g_match_history + 1,
-                (MATCH_HISTORY_SIZE - 1) * sizeof(MatchStats));
-        g_match_history[MATCH_HISTORY_SIZE - 1] = *s;
+    /* Push new generation result into rolling history (deploy boundaries only) */
+    if (push_history) {
+        if (g_match_history_count < MATCH_HISTORY_SIZE) {
+            g_match_history[g_match_history_count++] = *s;
+        } else {
+            memmove(g_match_history, g_match_history + 1,
+                    (MATCH_HISTORY_SIZE - 1) * sizeof(MatchStats));
+            g_match_history[MATCH_HISTORY_SIZE - 1] = *s;
+        }
     }
 
     /* Error section */
@@ -1085,17 +1090,18 @@ void llm_bot_submit_match(const MatchStats *s) {
     char history_section[2048] = "";
     int  hs_len = 0;
     hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
-        "=== Recent match results (%d match(es)) ===\n"
-        "Telemetry is aggregated across ALL your bots for that match.\n",
+        "=== Recent generation results (%d generation(s)) ===\n"
+        "Each entry is one deployed bot_llm generation, telemetry aggregated\n"
+        "across ALL your bots over that generation's lifetime in the arena.\n",
         g_match_history_count);
     for (int hi = 0; hi < g_match_history_count; hi++) {
         const MatchStats *h = &g_match_history[hi];
         hs_len += snprintf(history_section + hs_len, (int)sizeof(history_section) - hs_len,
-            "Match %d/%d: %.1fs | Survivors %d/%d | avgHP %.0f%% | Winner: %s\n"
+            "Gen %d: %.1fs | Survivors %d/%d | avgHP %.0f%% | Outcome: %s\n"
             "  Combat : shots_fired=%d  shots_hit=%d  hit_rate=%.1f%%  dmg=%.0f  kills=%d\n"
             "  Seeing : think_frames=%d  enemy_visible=%d (%.0f%%)  avg_nearest=%.2f u\n"
             "  Motion : arena_bumps=%d  wall_bumps=%d  fire_frames=%d\n",
-            h->match_number, h->total_matches,
+            h->match_number,
             (double)h->duration,
             h->llm_survivors, h->llm_start,
             (double)(h->llm_avg_hp_frac * 100.0f),
@@ -1156,13 +1162,28 @@ void llm_bot_submit_match(const MatchStats *s) {
 
     {
         char label[64];
-        snprintf(label, sizeof(label), "match %d/%d",
-                 s->match_number, s->total_matches);
+        snprintf(label, sizeof(label), "gen %d", s->match_number);
         launch_generation_thread(ta, label);
     }
 }
 
-void llm_bot_request_initial(int total_matches) {
+void llm_bot_submit_match(const MatchStats *s) {
+    start_generation(s, true, true);
+}
+
+void llm_bot_request_continue(void) {
+    pthread_mutex_lock(&g_mutex);
+    int count = g_match_history_count;
+    MatchStats latest;
+    memset(&latest, 0, sizeof(latest));
+    if (count > 0) latest = g_match_history[count - 1];
+    pthread_mutex_unlock(&g_mutex);
+
+    if (count == 0) return;   /* nothing learned yet; wait for first deploy */
+    start_generation(&latest, false, false);
+}
+
+void llm_bot_request_initial(void) {
     pthread_mutex_lock(&g_mutex);
     bool busy = g_thread_busy;
     if (!busy) g_thread_busy = true;
@@ -1207,22 +1228,21 @@ void llm_bot_request_initial(int total_matches) {
         "%s\n"
         "\n"
         "=== Startup request ===\n"
-        "Improve this script immediately before the first match starts.\n"
-        "There is no match history yet, so focus on producing a strong, stable,\n"
+        "Improve this script immediately before the arena starts.\n"
+        "There is no history yet, so focus on producing a strong, stable,\n"
         "runtime-safe script that follows the system rules.\n"
-        "Total planned matches: %d\n",
+        "This is a continuous arena: your bots respawn and self-improve forever.\n",
         g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
         g_user_prompt[0] != '\0' ? g_user_prompt : "",
         g_user_prompt[0] != '\0' ? "\n\n" : "",
         known_bugs,
-        current,
-        total_matches);
+        current);
 
     free(current);
     launch_generation_thread(ta, "startup bootstrap");
 }
 
-void llm_bot_request_prompt_refresh(int total_matches) {
+void llm_bot_request_prompt_refresh(void) {
     pthread_mutex_lock(&g_mutex);
     bool busy = g_thread_busy;
     if (!busy) g_thread_busy = true;
@@ -1268,14 +1288,12 @@ void llm_bot_request_prompt_refresh(int total_matches) {
         "\n"
         "=== Manual prompt refresh ===\n"
         "The user changed the extra instructions during the current session.\n"
-        "Regenerate the full script immediately using the new user context.\n"
-        "Total planned matches: %d\n",
+        "Regenerate the full script immediately using the new user context.\n",
         g_user_prompt[0] != '\0' ? "=== Extra user instructions ===\n" : "",
         g_user_prompt[0] != '\0' ? g_user_prompt : "",
         g_user_prompt[0] != '\0' ? "\n\n" : "",
         known_bugs,
-        current,
-        total_matches);
+        current);
 
     free(current);
     launch_generation_thread(ta, "prompt refresh");

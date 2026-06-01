@@ -72,9 +72,6 @@ typedef struct {
     bool  use_llm;
     bool  reset_llm_bot;
     bool  opposite_corners;
-    bool  auto_respawn;
-    int   num_matches;
-    int   match_duration;
     float bot_increment_per_match;
     char  llm_host[80];
     int   llm_port;
@@ -85,8 +82,6 @@ static const int   DEFAULT_BOTS[TOTAL_SCRIPTS] = { 2, 1, 1, 1, 1, 1, 5 };
 static const float DEFAULT_MAP_WIDTH            = 50.0f;
 static const float DEFAULT_MAP_HEIGHT           = 20.0f;
 static const int   DEFAULT_NUM_WALLS            = 2;
-static const int   DEFAULT_MATCH_DURATION       = 50;
-static const int   DEFAULT_NUM_MATCHES          = 10;
 static const int   BOT_COUNT_MAX                = 200;
 
 static float randf(float lo, float hi) {
@@ -167,9 +162,6 @@ static void config_set_defaults(GameConfig *cfg) {
     cfg->use_llm          = false;
     cfg->reset_llm_bot    = true;
     cfg->opposite_corners = true;
-    cfg->auto_respawn     = false;
-    cfg->num_matches      = DEFAULT_NUM_MATCHES;
-    cfg->match_duration   = DEFAULT_MATCH_DURATION;
     cfg->bot_increment_per_match = 0.0f;
     strncpy(cfg->llm_host, LLAMA_DEFAULT_HOST, sizeof(cfg->llm_host) - 1);
     cfg->llm_port = LLAMA_DEFAULT_PORT;
@@ -199,9 +191,6 @@ static bool config_load(GameConfig *cfg, const char *path) {
         else if (strcmp(key, "walls")           == 0) cfg->num_walls  = atoi(val);
         else if (strcmp(key, "wall_size")       == 0) cfg->wall_size  = atoi(val);
         else if (strcmp(key, "spawn_mode")      == 0) cfg->opposite_corners = (strstr(val, "corner") != NULL);
-        else if (strcmp(key, "game_mode")       == 0) cfg->auto_respawn = (strstr(val, "respawn") != NULL);
-        else if (strcmp(key, "num_matches")     == 0) cfg->num_matches = atoi(val);
-        else if (strcmp(key, "match_duration")  == 0) cfg->match_duration = atoi(val);
         else if (strcmp(key, "bot_increment_per_match") == 0) cfg->bot_increment_per_match = (float)atof(val);
         else if (strcmp(key, "bot_light")       == 0) cfg->bots_per_type[0] = atoi(val);
         else if (strcmp(key, "bot_skirmisher")  == 0) cfg->bots_per_type[1] = atoi(val);
@@ -237,10 +226,6 @@ static void config_save(const GameConfig *cfg, const char *path) {
     fprintf(f, "wall_size        = %-4d # 1-5 (1=line, 2-5=rectangle)\n", cfg->wall_size);
     fprintf(f, "spawn_mode       = %-8s # corners | random\n",
             cfg->opposite_corners ? "corners" : "random");
-    fprintf(f, "game_mode        = %-8s # match | respawn\n",
-            cfg->auto_respawn ? "respawn" : "match");
-    fprintf(f, "num_matches      = %-4d # 1-100\n",   cfg->num_matches);
-    fprintf(f, "match_duration   = %-4d # 1-600\n",   cfg->match_duration);
     fprintf(f, "bot_increment_per_match = %.2f # percent per match, 1=+1%%, 100=+100%%\n",
             (double)cfg->bot_increment_per_match);
     fprintf(f, "\n");
@@ -502,7 +487,7 @@ static bool show_config_screen(GameConfig *cfg) {
     const int SH      = GetRenderHeight();
     const int PW      = 1040;
     const int ROW_H   = 34;
-    const int ROWS    = TOTAL_SCRIPTS + 13;
+    const int ROWS    = TOTAL_SCRIPTS + 10;
     const int PH      = 60 + ROWS * ROW_H + 16;
     const int PX      = (SW - PW) / 2;
     const int PY      = (SH - PH) / 2 > 10 ? (SH - PH) / 2 : 10;
@@ -593,20 +578,6 @@ static bool show_config_screen(GameConfig *cfg) {
         }
         row++;
 
-        /* Game mode toggle */
-        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
-                 "Game mode");
-        {
-            const char *mode_text = cfg->auto_respawn
-                                    ? "Auto Respawn" : "Match";
-            bool ar = cfg->auto_respawn;
-            GuiToggle((Rectangle){(float)CTL_X, (float)ROW_Y + 2,
-                                  (float)CTL_W, (float)(ROW_H - 6)},
-                      mode_text, &ar);
-            cfg->auto_respawn = ar;
-        }
-        row++;
-
         /* LLM section */
         {
             bool chk = cfg->use_llm;
@@ -648,34 +619,6 @@ static bool show_config_screen(GameConfig *cfg) {
                  "Endpoint");
         GuiLabel((Rectangle){(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)},
                  TextFormat("%s:%d", cfg->llm_host, cfg->llm_port));
-        if (!cfg->use_llm) GuiEnable();
-        row++;
-
-        /* Number of matches */
-        if (!cfg->use_llm) GuiDisable();
-        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
-                 "Number of matches");
-        {
-            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
-            if (GuiSpinner(r, NULL, &cfg->num_matches, 1, 100, edit[4]))
-                edit[4] = !edit[4];
-            if (cfg->use_llm)
-                spinner_enhance(r, &cfg->num_matches, 1, 100);
-        }
-        if (!cfg->use_llm) GuiEnable();
-        row++;
-
-        /* Match duration */
-        if (!cfg->use_llm) GuiDisable();
-        GuiLabel((Rectangle){(float)(PX + 10), (float)ROW_Y, (float)LBL_W, (float)ROW_H},
-                 "Match duration (s)");
-        {
-            Rectangle r = {(float)CTL_X, (float)ROW_Y, (float)CTL_W, (float)(ROW_H - 4)};
-            if (GuiSpinner(r, NULL, &cfg->match_duration, 1, 600, edit[5]))
-                edit[5] = !edit[5];
-            if (cfg->use_llm)
-                spinner_enhance(r, &cfg->match_duration, 1, 600);
-        }
         if (!cfg->use_llm) GuiEnable();
         row++;
 
@@ -887,24 +830,119 @@ static void draw_wall_tapered_wires(float cx, float cy, float cz,
 }
 
 /* ----------------------------------------------------------------------- */
+/* Bounding-box dimensions used for placement on the chassis. The actual model
+ * drawn by draw_weapon_at() is built from multiple primitives within this box,
+ * with the receiver behind the mount point and the barrel extending forward. */
 static void weapon_dims(WeaponType wt, float *ww, float *wh, float *wd) {
     if (wt == WEAPON_MACHINE_GUN) {
-        *ww = CUBE_SIZE * 0.20f; *wh = CUBE_SIZE * 0.15f; *wd = CUBE_SIZE * 0.60f;
+        *ww = CUBE_SIZE * 0.32f; *wh = CUBE_SIZE * 0.32f; *wd = CUBE_SIZE * 0.95f;
     } else if (wt == WEAPON_AUTO_CANNON) {
-        *ww = CUBE_SIZE * 0.25f; *wh = CUBE_SIZE * 0.25f; *wd = CUBE_SIZE * 0.45f;
+        *ww = CUBE_SIZE * 0.50f; *wh = CUBE_SIZE * 0.50f; *wd = CUBE_SIZE * 1.20f;
     } else {
-        *ww = CUBE_SIZE * 0.12f; *wh = CUBE_SIZE * 0.12f; *wd = CUBE_SIZE * 0.80f;
+        *ww = CUBE_SIZE * 0.34f; *wh = CUBE_SIZE * 0.34f; *wd = CUBE_SIZE * 1.10f;
     }
 }
 
-/* Draw a weapon centred at (cx, cy, cz) in the current local frame.
- * Barrel points along local +z (forward). */
+static Color color_scale(Color c, float k) {
+    int r = (int)(c.r * k); if (r > 255) r = 255; if (r < 0) r = 0;
+    int g = (int)(c.g * k); if (g > 255) g = 255; if (g < 0) g = 0;
+    int b = (int)(c.b * k); if (b > 255) b = 255; if (b < 0) b = 0;
+    return (Color){ (unsigned char)r, (unsigned char)g, (unsigned char)b, c.a };
+}
+
+/* Draw a weapon model centred at (cx, cy, cz) in the current local frame.
+ * Barrel points along local +z (forward). Each weapon is built from a few
+ * primitives so the silhouette is recognisable at gameplay zoom. */
 static void draw_weapon_at(WeaponType wt, float cx, float cy, float cz, Color col) {
     float ww, wh, wd;
     weapon_dims(wt, &ww, &wh, &wd);
-    Vector3 c = { cx, cy, cz + wd * 0.1f };
-    DrawCube(c, ww, wh, wd, col);
-    DrawCubeWires(c, ww, wh, wd, BLACK);
+
+    Color dark   = color_scale(col, 0.55f);
+    Color darker = color_scale(col, 0.35f);
+    Color hot    = (Color){ 255, 210,  80, 255 };
+
+    if (wt == WEAPON_MACHINE_GUN) {
+        /* Boxy receiver, side ammo can, ribbed barrel, muzzle brake. */
+        float rec_d = wd * 0.40f;
+        Vector3 rec_c = { cx, cy, cz - wd * 0.30f };
+        DrawCube(rec_c, ww, wh, rec_d, col);
+        DrawCubeWires(rec_c, ww, wh, rec_d, BLACK);
+
+        float amo_w = ww * 0.50f, amo_h = wh * 0.70f, amo_d = rec_d * 0.85f;
+        Vector3 amo_c = { cx + ww * 0.5f + amo_w * 0.5f + 0.005f,
+                          cy - wh * 0.10f, cz - wd * 0.30f };
+        DrawCube(amo_c, amo_w, amo_h, amo_d, dark);
+        DrawCubeWires(amo_c, amo_w, amo_h, amo_d, BLACK);
+
+        float bar_r = ww * 0.18f;
+        Vector3 ba = { cx, cy, cz - wd * 0.10f };
+        Vector3 bb = { cx, cy, cz + wd * 0.48f };
+        DrawCylinderEx(ba, bb, bar_r, bar_r * 0.85f, 10, dark);
+        DrawCylinderWiresEx(ba, bb, bar_r, bar_r * 0.85f, 10, BLACK);
+
+        Vector3 ma = { cx, cy, cz + wd * 0.48f };
+        Vector3 mb = { cx, cy, cz + wd * 0.60f };
+        DrawCylinderEx(ma, mb, bar_r * 1.7f, bar_r * 1.4f, 10, col);
+        DrawCylinderWiresEx(ma, mb, bar_r * 1.7f, bar_r * 1.4f, 10, BLACK);
+    }
+    else if (wt == WEAPON_AUTO_CANNON) {
+        /* Chunky breech with a top recoil cradle and a fat long barrel. */
+        float bre_d = wd * 0.42f;
+        Vector3 bre_c = { cx, cy, cz - wd * 0.29f };
+        DrawCube(bre_c, ww, wh, bre_d, col);
+        DrawCubeWires(bre_c, ww, wh, bre_d, BLACK);
+
+        float cra_w = ww * 0.70f, cra_h = wh * 0.30f, cra_d = bre_d * 0.80f;
+        Vector3 cra_c = { cx, cy + wh * 0.5f + cra_h * 0.5f, cz - wd * 0.29f };
+        DrawCube(cra_c, cra_w, cra_h, cra_d, dark);
+        DrawCubeWires(cra_c, cra_w, cra_h, cra_d, BLACK);
+
+        float bar_r = ww * 0.30f;
+        Vector3 ba = { cx, cy, cz - wd * 0.08f };
+        Vector3 bb = { cx, cy, cz + wd * 0.48f };
+        DrawCylinderEx(ba, bb, bar_r, bar_r, 12, dark);
+        DrawCylinderWiresEx(ba, bb, bar_r, bar_r, 12, BLACK);
+
+        /* Recoil ring near the breech end of the barrel. */
+        Vector3 ra = { cx, cy, cz - wd * 0.04f };
+        Vector3 rb = { cx, cy, cz + wd * 0.04f };
+        DrawCylinderEx(ra, rb, bar_r * 1.35f, bar_r * 1.35f, 12, darker);
+        DrawCylinderWiresEx(ra, rb, bar_r * 1.35f, bar_r * 1.35f, 12, BLACK);
+
+        /* Muzzle ring (slightly flared). */
+        Vector3 ma = { cx, cy, cz + wd * 0.48f };
+        Vector3 mb = { cx, cy, cz + wd * 0.60f };
+        DrawCylinderEx(ma, mb, bar_r * 1.45f, bar_r * 1.25f, 12, col);
+        DrawCylinderWiresEx(ma, mb, bar_r * 1.45f, bar_r * 1.25f, 12, BLACK);
+    }
+    else {
+        /* WEAPON_LASER: emitter housing with cooling fins + slim focused tube
+         * + hot lens disc at the muzzle. */
+        float emi_d = wd * 0.42f;
+        Vector3 emi_c = { cx, cy, cz - wd * 0.29f };
+        DrawCube(emi_c, ww, wh, emi_d, col);
+        DrawCubeWires(emi_c, ww, wh, emi_d, BLACK);
+
+        float fin_w = ww * 0.85f, fin_h = wh * 0.20f, fin_d = emi_d * 0.16f;
+        for (int i = 0; i < 3; i++) {
+            float fz = (i - 1) * (emi_d * 0.32f);
+            Vector3 fc = { cx, cy + wh * 0.5f + fin_h * 0.5f,
+                           cz - wd * 0.29f + fz };
+            DrawCube(fc, fin_w, fin_h, fin_d, darker);
+            DrawCubeWires(fc, fin_w, fin_h, fin_d, BLACK);
+        }
+
+        float tub_r = ww * 0.16f;
+        Vector3 ta = { cx, cy, cz - wd * 0.08f };
+        Vector3 tb = { cx, cy, cz + wd * 0.46f };
+        DrawCylinderEx(ta, tb, tub_r, tub_r * 0.6f, 12, dark);
+        DrawCylinderWiresEx(ta, tb, tub_r, tub_r * 0.6f, 12, BLACK);
+
+        Vector3 la = { cx, cy, cz + wd * 0.46f };
+        Vector3 lb = { cx, cy, cz + wd * 0.54f };
+        DrawCylinderEx(la, lb, tub_r * 1.8f, tub_r * 1.8f, 12, hot);
+        DrawCylinderWiresEx(la, lb, tub_r * 1.8f, tub_r * 1.8f, 12, BLACK);
+    }
 }
 
 /* Returns the locomotion's vertical "deck" height at which the body sits. */
@@ -925,6 +963,8 @@ static float bot_body_top_y(const BotConfig *cfg) {
 
 static void draw_locomotion(const BotConfig *cfg, const BotInertia *iner) {
     Color trk_col = g_colors.bot_tread;
+    Color trk_dim = color_scale(trk_col, 0.55f);
+    Color trk_drk = color_scale(trk_col, 0.35f);
     float bs   = CUBE_SIZE;
     float bx   = bs * cfg->body_sx;
     float bz   = bs * cfg->body_sz;
@@ -932,19 +972,54 @@ static void draw_locomotion(const BotConfig *cfg, const BotInertia *iner) {
 
     switch (cfg->locomotion) {
         case LOCO_TRACKS: {
-            float trk_sx = bx * 1.05f;
-            float trk_sz = bz * 1.10f;
-            float trk_h  = deck;
-            DrawCube((Vector3){0, trk_h * 0.5f, 0}, trk_sx, trk_h, trk_sz, trk_col);
-            DrawCubeWires((Vector3){0, trk_h * 0.5f, 0}, trk_sx, trk_h, trk_sz, BLACK);
+            /* Two side plates with a drive sprocket + idler wheel + a row of
+             * exposed track shoes along the bottom of each side. */
+            float trk_sx   = bx * 1.05f;
+            float trk_sz   = bz * 1.25f;
+            float trk_h    = deck;
+            float plate_w  = bs * 0.20f;
+            float plate_offset = (trk_sx - plate_w) * 0.5f;
+
+            for (int side = -1; side <= 1; side += 2) {
+                float px = (float)side * plate_offset;
+
+                Vector3 pc = { px, trk_h * 0.55f, 0.0f };
+                DrawCube(pc, plate_w, trk_h * 0.85f, trk_sz * 0.85f, trk_col);
+                DrawCubeWires(pc, plate_w, trk_h * 0.85f, trk_sz * 0.85f, BLACK);
+
+                float spr_r = trk_h * 0.50f;
+                float spr_w = plate_w * 1.20f;
+                for (int end = -1; end <= 1; end += 2) {
+                    float ez = (float)end * (trk_sz * 0.5f - spr_r);
+                    Vector3 sa = { px - spr_w * 0.5f, spr_r, ez };
+                    Vector3 sb = { px + spr_w * 0.5f, spr_r, ez };
+                    DrawCylinderEx(sa, sb, spr_r, spr_r, 12, trk_drk);
+                    DrawCylinderWiresEx(sa, sb, spr_r, spr_r, 12, BLACK);
+                }
+
+                /* Track shoes (small dark cubes) along the bottom. */
+                int   shoe_n  = 6;
+                float shoe_w  = plate_w * 1.30f;
+                float shoe_h  = bs * 0.08f;
+                float shoe_d  = trk_sz * 0.14f;
+                float shoe_span = trk_sz - 2.0f * spr_r;
+                float shoe_gap  = shoe_span / (float)shoe_n;
+                for (int k = 0; k < shoe_n; k++) {
+                    float sz = -shoe_span * 0.5f + (k + 0.5f) * shoe_gap;
+                    Vector3 c = { px, shoe_h * 0.55f, sz };
+                    DrawCube(c, shoe_w, shoe_h, shoe_d * 0.85f, trk_drk);
+                    DrawCubeWires(c, shoe_w, shoe_h, shoe_d * 0.85f, BLACK);
+                }
+            }
             break;
         }
         case LOCO_WHEELS: {
-            float wh_r = deck * 0.5f;
-            float wh_w = bs * 0.18f;
-            float wh_y = wh_r;
-            float wxoff = bx * 0.5f + wh_w * 0.3f;
-            float wzoff = bz * 0.4f;
+            /* Bigger, wider tyres with a darker exposed hub on the outside. */
+            float wh_r  = deck * 0.62f;
+            float wh_w  = bs * 0.26f;
+            float wh_y  = wh_r;
+            float wxoff = bx * 0.55f + wh_w * 0.20f;
+            float wzoff = bz * 0.42f;
             Vector3 wheels[4] = {
                 { -wxoff, wh_y, +wzoff },
                 { +wxoff, wh_y, +wzoff },
@@ -954,40 +1029,76 @@ static void draw_locomotion(const BotConfig *cfg, const BotInertia *iner) {
             for (int i = 0; i < 4; i++) {
                 Vector3 a = { wheels[i].x - wh_w * 0.5f, wheels[i].y, wheels[i].z };
                 Vector3 b = { wheels[i].x + wh_w * 0.5f, wheels[i].y, wheels[i].z };
-                DrawCylinderEx(a, b, wh_r, wh_r, 12, trk_col);
-                DrawCylinderWiresEx(a, b, wh_r, wh_r, 12, BLACK);
+                DrawCylinderEx(a, b, wh_r, wh_r, 14, trk_col);
+                DrawCylinderWiresEx(a, b, wh_r, wh_r, 14, BLACK);
+
+                /* Hub: smaller darker cylinder that sticks slightly out the
+                 * outboard side. */
+                float hub_r = wh_r * 0.40f;
+                float outboard = (wheels[i].x > 0.0f) ? +1.0f : -1.0f;
+                Vector3 ha = { wheels[i].x + outboard * wh_w * 0.35f,
+                               wheels[i].y, wheels[i].z };
+                Vector3 hb = { wheels[i].x + outboard * wh_w * 0.55f,
+                               wheels[i].y, wheels[i].z };
+                DrawCylinderEx(ha, hb, hub_r, hub_r, 12, trk_drk);
+                DrawCylinderWiresEx(ha, hb, hub_r, hub_r, 12, BLACK);
             }
             break;
         }
         case LOCO_LEGS_4:
         case LOCO_LEGS_2: {
-            int   n     = (cfg->locomotion == LOCO_LEGS_4) ? 4 : 2;
-            float leg_w = bs * 0.18f;
-            float leg_h = deck;
-            /* Swing in radians; ~14 deg amplitude. */
-            float swing = sinf(iner->move_anim_t * 6.0f) * 0.25f;
+            /* Two-segment legs (thigh + shin) with a darker knee bulge. The
+             * hip swings forward/back and the knee bends counter to keep the
+             * foot tracking roughly under the hip — a cheap but readable gait. */
+            int   n        = (cfg->locomotion == LOCO_LEGS_4) ? 4 : 2;
+            float total_h  = deck;
+            float thigh_h  = total_h * 0.55f;
+            float shin_h   = total_h * 0.45f;
+            float thigh_w  = bs * 0.26f;
+            float thigh_d  = bs * 0.22f;
+            float shin_w   = bs * 0.20f;
+            float shin_d   = bs * 0.18f;
+            float knee_w   = bs * 0.28f;
+            float swing    = sinf(iner->move_anim_t * 6.0f) * 0.35f;
 
             for (int i = 0; i < n; i++) {
                 float lx, lz, my_swing;
                 if (n == 4) {
                     bool front = (i < 2);
                     bool right = ((i % 2) == 1);
-                    lx = right ? +bx * 0.4f : -bx * 0.4f;
-                    lz = front ? +bz * 0.4f : -bz * 0.4f;
-                    /* Diagonal pairs swing together. */
+                    lx = right ? +bx * 0.45f : -bx * 0.45f;
+                    lz = front ? +bz * 0.45f : -bz * 0.45f;
                     my_swing = (front == right) ? swing : -swing;
                 } else {
-                    lx = (i == 0) ? -bx * 0.4f : +bx * 0.4f;
+                    lx = (i == 0) ? -bx * 0.45f : +bx * 0.45f;
                     lz = 0.0f;
                     my_swing = (i == 0) ? swing : -swing;
                 }
                 rlPushMatrix();
-                    /* Pivot at the top of the leg (where it meets the body). */
-                    rlTranslatef(lx, leg_h, lz);
-                    /* Swing forward/back: rotation around lateral (x) axis. */
+                    /* Hip pivot at deck height. */
+                    rlTranslatef(lx, total_h, lz);
                     rlRotatef(my_swing * RAD2DEG_F, 1.0f, 0.0f, 0.0f);
-                    DrawCube((Vector3){0, -leg_h * 0.5f, 0}, leg_w, leg_h, leg_w, trk_col);
-                    DrawCubeWires((Vector3){0, -leg_h * 0.5f, 0}, leg_w, leg_h, leg_w, BLACK);
+
+                    /* Thigh hangs down from hip. */
+                    DrawCube((Vector3){0, -thigh_h * 0.5f, 0},
+                             thigh_w, thigh_h, thigh_d, trk_col);
+                    DrawCubeWires((Vector3){0, -thigh_h * 0.5f, 0},
+                                  thigh_w, thigh_h, thigh_d, BLACK);
+
+                    /* Knee joint: small darker chunky cube at the bend. */
+                    rlTranslatef(0.0f, -thigh_h, 0.0f);
+                    DrawCube((Vector3){0, 0, 0},
+                             knee_w, knee_w * 0.55f, thigh_d * 1.05f, trk_drk);
+                    DrawCubeWires((Vector3){0, 0, 0},
+                                  knee_w, knee_w * 0.55f, thigh_d * 1.05f, BLACK);
+
+                    /* Shin counter-bends to keep the foot roughly under the
+                     * body even as the hip swings. */
+                    rlRotatef(-my_swing * RAD2DEG_F * 1.1f, 1.0f, 0.0f, 0.0f);
+                    DrawCube((Vector3){0, -shin_h * 0.5f, 0},
+                             shin_w, shin_h, shin_d, trk_dim);
+                    DrawCubeWires((Vector3){0, -shin_h * 0.5f, 0},
+                                  shin_w, shin_h, shin_d, BLACK);
                 rlPopMatrix();
             }
             break;
@@ -1128,6 +1239,15 @@ static void respawn_team(int script_idx, const GameConfig *gcfg,
     }
 }
 
+static void kill_team(int script_idx) {
+    for (int i = 0; i < g_bot_count; i++) {
+        Bot *bot = &g_bots[i];
+        if (bot->script_id != script_idx) continue;
+        bot->active = false;
+        bot->hp     = 0.0f;
+    }
+}
+
 static void match_setup(MatchState *ms, const GameConfig *gcfg,
                         float arena_half_x, float arena_half_z,
                         unsigned wall_seed, int match_idx)
@@ -1229,9 +1349,7 @@ static void match_teardown(void) {
 }
 
 /* ----------------------------------------------------------------------- */
-static void draw_llm_panel(const LlmVisState *vis,
-                            int match_idx, int total_matches,
-                            float match_time, float match_duration)
+static void draw_llm_panel(const LlmVisState *vis, int generation)
 {
     const int PW  = 400;
     const int FSZ = 15;
@@ -1293,10 +1411,8 @@ static void draw_llm_panel(const LlmVisState *vis,
     DrawText(sts_txt, cx + 46, cy, FSZ, sts_col);
     cy += LH;
 
-    DrawText("MCH>", cx,      cy, FSZ, dim);
-    DrawText(TextFormat("%d / %d   T %.0fs",
-                        match_idx + 1, total_matches,
-                        (double)(match_duration - match_time)),
+    DrawText("GEN>", cx,      cy, FSZ, dim);
+    DrawText(TextFormat("%d", generation),
              cx + 46, cy, FSZ, norm);
     cy += LH;
 
@@ -1346,46 +1462,78 @@ static void draw_llm_panel(const LlmVisState *vis,
 }
 
 /* ----------------------------------------------------------------------- */
-static void show_match_result(const MatchStats *ms, bool llm_busy, bool is_last) {
-    float show_for = 1.0f;
-    float elapsed  = 0.0f;
-    while (elapsed < show_for && !WindowShouldClose()) {
-        elapsed += GetFrameTime();
+/* Snapshot the current LLM generation's telemetry and submit it to the LLM
+ * pipeline. Called at each deploy boundary (LLM team wiped or forced redeploy)
+ * so the next generation learns from how the previous one actually fought. */
+static void submit_epoch_telemetry(const MatchState *ms,
+                                   const int alive[TOTAL_SCRIPTS],
+                                   int generation, float epoch_time,
+                                   const char *pending_error)
+{
+    MatchStats mstats;
+    memset(&mstats, 0, sizeof(mstats));
+    mstats.match_number  = generation;
+    mstats.total_matches = 0;            /* 0 == continuous (no fixed count) */
+    mstats.duration      = epoch_time;
+    mstats.llm_start     = ms->spawn_count[LLM_SCRIPT_IDX];
+    mstats.llm_survivors = alive[LLM_SCRIPT_IDX];
 
-        BeginDrawing();
-        ClearBackground(g_colors.bg_results);
-
-        int cx = GetRenderWidth()  / 2;
-        int cy = GetRenderHeight() / 2;
-
-        DrawText(TextFormat("MATCH %d / %d COMPLETE",
-                            ms->match_number, ms->total_matches),
-                 cx - 220, cy - 120, 38, WHITE);
-        DrawText(TextFormat("Winner: %s", ms->winner_name),
-                 cx - 220, cy - 68,  30, YELLOW);
-        DrawText(TextFormat("Duration: %.1f s   |   bot_llm: %d / %d survived",
-                            (double)ms->duration,
-                            ms->llm_survivors, ms->llm_start),
-                 cx - 220, cy - 24, 22, LIGHTGRAY);
-        DrawText(TextFormat("Damage dealt: %.0f   |   Kills: %d",
-                            (double)ms->damage_dealt, ms->kills),
-                 cx - 220, cy + 10, 22, LIGHTGRAY);
-
-        if (llm_busy)
-            DrawText("LLM optimising next script ...", cx - 220, cy + 55, 24, SKYBLUE);
-        else if (ms->match_number < ms->total_matches)
-            DrawText("Script updated — loading next match!", cx - 220, cy + 55, 24, GREEN);
-
-        float frac     = 1.0f - (elapsed / show_for);
-        int   bar_full = GetRenderWidth() - 100;
-        DrawRectangle(50, cy + 105, (int)(bar_full * frac), 6, RAYWHITE);
-        const char *next_lbl = is_last ? "Results screen in 1 s"
-                                       : TextFormat("Next match in %d s",
-                                                    (int)(show_for - elapsed) + 1);
-        DrawText(next_lbl, cx - 70, cy + 118, 20, GRAY);
-
-        EndDrawing();
+    float hp_frac_sum = 0.0f;
+    int   hp_count    = 0;
+    for (int i = 0; i < g_bot_count; i++) {
+        Bot *b = &g_bots[i];
+        if (!b->active) continue;
+        if (b->config.script_idx == LLM_SCRIPT_IDX) {
+            hp_frac_sum += b->hp / b->config.max_hp;
+            hp_count++;
+        }
     }
+    mstats.llm_avg_hp_frac = (hp_count > 0)
+                             ? hp_frac_sum / (float)hp_count : 0.0f;
+
+    update_get_llm_stats(&mstats.damage_dealt, &mstats.kills);
+    update_get_runtime_error(mstats.runtime_error, sizeof(mstats.runtime_error));
+
+    {
+        LlmTelemetry tel;
+        update_telemetry_get(&tel);
+        mstats.think_frames         = tel.think_frames;
+        mstats.enemy_visible_frames = tel.enemy_visible_frames;
+        mstats.fire_frames          = tel.fire_frames;
+        mstats.shots_fired          = tel.shots_fired;
+        mstats.shots_hit            = tel.shots_hit;
+        mstats.arena_bumps          = tel.arena_bumps;
+        mstats.wall_bumps           = tel.wall_bumps;
+        mstats.avg_nearest_dist     = (tel.nearest_dist_samples > 0)
+            ? tel.nearest_dist_sum / (float)tel.nearest_dist_samples : 0.0f;
+        mstats.visibility_frac      = (tel.think_frames > 0)
+            ? (float)tel.enemy_visible_frames / (float)tel.think_frames : 0.0f;
+        mstats.hit_rate             = (tel.shots_fired > 0)
+            ? (float)tel.shots_hit / (float)tel.shots_fired : 0.0f;
+    }
+
+    if (ms->llm_load_error[0] != '\0')
+        strncpy(mstats.script_error, ms->llm_load_error,
+                sizeof(mstats.script_error) - 1);
+    else if (pending_error && pending_error[0] != '\0')
+        strncpy(mstats.script_error, pending_error,
+                sizeof(mstats.script_error) - 1);
+
+    int end_llm_alive = alive[LLM_SCRIPT_IDX];
+    int end_non_llm   = 0;
+    for (int s = 0; s < TOTAL_SCRIPTS; s++)
+        if (s != LLM_SCRIPT_IDX && alive[s] > 0) end_non_llm++;
+
+    const char *winner_name;
+    if (end_non_llm == 0 && end_llm_alive > 0)
+        winner_name = script_labels[LLM_SCRIPT_IDX];
+    else if (end_llm_alive == 0 && end_non_llm > 0)
+        winner_name = "non_llm";
+    else
+        winner_name = "draw";
+    strncpy(mstats.winner_name, winner_name, sizeof(mstats.winner_name) - 1);
+
+    llm_bot_submit_match(&mstats);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1438,39 +1586,32 @@ int main(void) {
         llm_bot_init(gcfg.llm_host, gcfg.llm_port,
                      script_paths[LLM_SCRIPT_IDX],
                      gcfg.llm_user_prompt);
-        llm_bot_request_initial(gcfg.num_matches);
+        llm_bot_request_initial();
     }
 
-    int  match_idx  = 0;
     bool outer_done = false;
-    char match_winners[64][32];
-    memset(match_winners, 0, sizeof(match_winners));
     char llm_pending_error[512] = {0};
+    int  generation = 0;
 
-    while (!WindowShouldClose() && !outer_done) {
-
+        /* Continuous arena: build the world once, then run a single per-frame
+         * loop. The LLM team is redeployed (reloading the newest validated
+         * script from disk) only when the whole current generation is wiped or
+         * the player presses R. Non-LLM teams respawn whenever wiped. */
         MatchState ms;
-        unsigned wall_seed = (unsigned)time(NULL) + (unsigned)(match_idx * 31337);
-        match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed, match_idx);
+        unsigned wall_seed = (unsigned)time(NULL);
+        match_setup(&ms, &gcfg, arena_half_x, arena_half_z, wall_seed, 0);
         update_reset_llm_stats();
         update_telemetry_reset();
         update_clear_runtime_error();
 
-        float match_time    = 0.0f;
-        bool  match_over    = false;
-        bool  restart_match = false;
         int   alive[TOTAL_SCRIPTS] = {0};
-        int   rounds_llm    = 0;
-        int   rounds_nonllm = 0;
-
-        int teams_with_bots = 0;
-        for (int s = 0; s < TOTAL_SCRIPTS; s++)
-            if (ms.spawn_count[s] > 0) teams_with_bots++;
+        float epoch_time = 0.0f;
 
         /* -------------------------------------------------------------- */
-        while (!WindowShouldClose() && !match_over) {
+        while (!WindowShouldClose() && !outer_done) {
             float dt = GetFrameTime();
-            match_time += dt;
+            bool  force_deploy = false;
+            epoch_time += dt;
 
             /* Prompt bar: click inside to focus, Enter to send, Esc to unfocus */
             if (gcfg.use_llm) {
@@ -1490,7 +1631,7 @@ int main(void) {
                         gcfg.llm_user_prompt[sizeof(gcfg.llm_user_prompt) - 1] = '\0';
                         config_save(&gcfg, CFG_PATH);
                         llm_bot_set_user_prompt(gcfg.llm_user_prompt);
-                        llm_bot_request_prompt_refresh(gcfg.num_matches);
+                        llm_bot_request_prompt_refresh();
                         prompt_focused = false;
                     }
                     if (IsKeyPressed(KEY_ESCAPE)) {
@@ -1538,7 +1679,7 @@ int main(void) {
 
                 if (IsKeyPressed(KEY_F))      ToggleFullscreen();
                 if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
-                if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
+                if (IsKeyPressed(KEY_R))      force_deploy = true;
                 if (IsKeyPressed(KEY_C)) {
                     camera->position   = (Vector3){40.0f, 40.0f, 40.0f};
                     camera->target     = (Vector3){ 0.0f,  0.0f,  0.0f};
@@ -1546,28 +1687,21 @@ int main(void) {
                     camera->fovy       = 50.0f;
                     camera->projection = CAMERA_PERSPECTIVE;
                 }
-                if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
-                if (IsKeyPressed(KEY_I)) {
-                    if (camera->projection == CAMERA_PERSPECTIVE) {
-                        camera->projection = CAMERA_ORTHOGRAPHIC;
-                        float dist = Vector3Distance(camera->position, camera->target);
-                        camera->fovy = dist * tanf(DEG2RAD * camera->fovy * 0.5f) * 2.0f;
-                    } else {
-                        camera->projection = CAMERA_PERSPECTIVE;
-                        camera->fovy = 50.0f;
-                    }
-                }
+                if (IsKeyPressed(KEY_ESCAPE)) outer_done = true;
             }
 
-            /* Simulation tick — always runs */
-            if (!match_over) {
-                update_scripts(g_bots, g_bot_count, dt);
-                update_inertia(g_bots, g_bot_count, dt);
-                update_movement(g_bots, g_bot_count, dt);
-                update_projectiles(g_projs, &g_proj_count, g_bots, g_bot_count, dt);
-                fx_update(dt);
-                lighting_update(dt);
-            }
+            /* Simulation tick */
+            update_scripts(g_bots, g_bot_count, dt);
+            update_inertia(g_bots, g_bot_count, dt);
+            update_movement(g_bots, g_bot_count, dt);
+            update_projectiles(g_projs, &g_proj_count, g_bots, g_bot_count, dt);
+            fx_update(dt);
+            lighting_update(dt);
+
+            /* Continuous self-improvement: keep the generator running
+             * back-to-back in the background whenever it is idle. */
+            if (gcfg.use_llm && !llm_bot_is_busy())
+                llm_bot_request_continue();
 
             /* ---- Render ------------------------------------------------- */
             BeginDrawing();
@@ -1746,12 +1880,8 @@ int main(void) {
                 EndMode3D();
 
                 /* HUD */
-                const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  C reset cam  T scan  F full  R restart  ESC quit"
-                                 "   Match %d/%d  %.0fs left",
-                                 match_idx + 1, gcfg.num_matches,
-                                 (double)(gcfg.match_duration - match_time))
-                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  C reset cam  T scan  F full  R restart  ESC quit";
+                const char *ctrl_hint =
+                    "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  C reset cam  T scan  F full  R deploy  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 int hud_top = 34;
@@ -1777,9 +1907,8 @@ int main(void) {
                                         alive[s], ms.spawn_count[s]),
                              10, hud_top + s * 22, 20, g_colors.team[s]);
                 }
-                if (gcfg.auto_respawn) {
-                    DrawText(TextFormat("Rounds  —  LLM: %d   Others: %d",
-                                        rounds_llm, rounds_nonllm),
+                if (gcfg.use_llm) {
+                    DrawText(TextFormat("Generation: %d", generation),
                              10, hud_top + TOTAL_SCRIPTS * 22 + 4, 20, RAYWHITE);
                     DrawFPS(10, hud_top + TOTAL_SCRIPTS * 22 + 30);
                 } else {
@@ -1789,8 +1918,7 @@ int main(void) {
                 if (gcfg.use_llm) {
                     LlmVisState vis;
                     llm_bot_get_vis_state(&vis);
-                    draw_llm_panel(&vis, match_idx, gcfg.num_matches,
-                                    match_time, (float)gcfg.match_duration);
+                    draw_llm_panel(&vis, generation);
 
                     /* Persistent prompt bar at the bottom */
                     int sw = GetRenderWidth();
@@ -1826,228 +1954,49 @@ int main(void) {
 
             EndDrawing();
 
-            /* Check match-end conditions */
+            /* Continuous arena: every team keeps spawning. Each non-LLM team
+             * respawns the instant it is individually wiped, so no side is ever
+             * left lying dead waiting for the others. The LLM team respawns on
+             * its own wipe (or on R), which is when the newest validated script
+             * from disk is deployed. */
             {
-                int llm_alive   = alive[LLM_SCRIPT_IDX];
-                int non_llm_alive = 0;
-                for (int s = 0; s < TOTAL_SCRIPTS; s++)
-                    if (s != LLM_SCRIPT_IDX && alive[s] > 0) non_llm_alive++;
-
-                if (match_time > 3.0f && teams_with_bots > 1) {
-                    if (llm_alive == 0 || non_llm_alive == 0) {
-                        if (gcfg.auto_respawn) {
-                            if (llm_alive == 0) {
-                                rounds_nonllm++;
-                                respawn_team(LLM_SCRIPT_IDX, &gcfg,
-                                             arena_half_x, arena_half_z);
-                            }
-                            if (non_llm_alive == 0) {
-                                rounds_llm++;
-                                for (int s = 0; s < TOTAL_SCRIPTS; s++)
-                                    if (s != LLM_SCRIPT_IDX && ms.spawn_count[s] > 0)
-                                        respawn_team(s, &gcfg,
-                                                     arena_half_x, arena_half_z);
-                            }
-                        } else {
-                            match_over = true;
-                        }
-                    }
-                }
-                if (gcfg.use_llm &&
-                    match_time >= (float)gcfg.match_duration)
-                    match_over = true;
-            }
-        } /* end inner loop */
-
-        /* -------------------------------------------------------------- */
-        if (restart_match || outer_done) {
-            match_teardown();
-            continue;
-        }
-
-        if (gcfg.use_llm) {
-            MatchStats mstats;
-            memset(&mstats, 0, sizeof(mstats));
-            mstats.match_number   = match_idx + 1;
-            mstats.total_matches  = gcfg.num_matches;
-            mstats.duration       = match_time;
-            mstats.llm_start      = ms.spawn_count[LLM_SCRIPT_IDX];
-            mstats.llm_survivors  = alive[LLM_SCRIPT_IDX];
-
-            float hp_frac_sum = 0.0f;
-            int   hp_count    = 0;
-            for (int i = 0; i < g_bot_count; i++) {
-                Bot *b = &g_bots[i];
-                if (!b->active) continue;
-                if (b->config.script_idx == LLM_SCRIPT_IDX) {
-                    hp_frac_sum += b->hp / b->config.max_hp;
-                    hp_count++;
-                }
-            }
-            mstats.llm_avg_hp_frac = (hp_count > 0)
-                                     ? hp_frac_sum / (float)hp_count : 0.0f;
-
-            update_get_llm_stats(&mstats.damage_dealt, &mstats.kills);
-            update_get_runtime_error(mstats.runtime_error, sizeof(mstats.runtime_error));
-
-            {
-                LlmTelemetry tel;
-                update_telemetry_get(&tel);
-                mstats.think_frames         = tel.think_frames;
-                mstats.enemy_visible_frames = tel.enemy_visible_frames;
-                mstats.fire_frames          = tel.fire_frames;
-                mstats.shots_fired          = tel.shots_fired;
-                mstats.shots_hit            = tel.shots_hit;
-                mstats.arena_bumps          = tel.arena_bumps;
-                mstats.wall_bumps           = tel.wall_bumps;
-                mstats.avg_nearest_dist     = (tel.nearest_dist_samples > 0)
-                    ? tel.nearest_dist_sum / (float)tel.nearest_dist_samples : 0.0f;
-                mstats.visibility_frac      = (tel.think_frames > 0)
-                    ? (float)tel.enemy_visible_frames / (float)tel.think_frames : 0.0f;
-                mstats.hit_rate             = (tel.shots_fired > 0)
-                    ? (float)tel.shots_hit / (float)tel.shots_fired : 0.0f;
-            }
-
-            if (ms.llm_load_error[0] != '\0')
-                strncpy(mstats.script_error, ms.llm_load_error,
-                        sizeof(mstats.script_error) - 1);
-            else
-                strncpy(mstats.script_error, llm_pending_error,
-                        sizeof(mstats.script_error) - 1);
-
-            /* Two-sided match: LLM vs non-LLM coalition.
-             * Winner is "bot_llm" if all non-LLM bots are gone, "non_llm" if
-             * all LLM bots are gone, or "timeout" if neither side is wiped. */
-            int end_llm_alive = alive[LLM_SCRIPT_IDX];
-            int end_non_llm   = 0;
-            for (int s = 0; s < TOTAL_SCRIPTS; s++)
-                if (s != LLM_SCRIPT_IDX && alive[s] > 0) end_non_llm++;
-
-            const char *winner_name;
-            if (end_non_llm == 0 && end_llm_alive > 0)
-                winner_name = script_labels[LLM_SCRIPT_IDX];
-            else if (end_llm_alive == 0 && end_non_llm > 0)
-                winner_name = "non_llm";
-            else
-                winner_name = "timeout";
-            strncpy(mstats.winner_name, winner_name, sizeof(mstats.winner_name) - 1);
-
-            if (match_idx < 64)
-                strncpy(match_winners[match_idx], mstats.winner_name,
-                        sizeof(match_winners[0]) - 1);
-
-            llm_bot_submit_match(&mstats);
-
-            bool is_last = (match_idx + 1 >= gcfg.num_matches);
-            show_match_result(&mstats, llm_bot_is_busy(), is_last);
-
-            {
-                char gen_err[512] = {0};
-                if (llm_bot_poll_gen_error(gen_err, sizeof(gen_err)))
-                    strncpy(llm_pending_error, gen_err,
-                            sizeof(llm_pending_error) - 1);
-                else if (llm_bot_poll_ready())
-                    llm_pending_error[0] = '\0';
-            }
-
-            match_idx++;
-            if (match_idx >= gcfg.num_matches)
-                outer_done = true;
-        } else {
-            match_idx++;
-            outer_done = true;
-        }
-
-        match_teardown();
-    } /* end outer loop */
-
-    /* ================================================================== */
-    int total_played = match_idx;
-    if (total_played > 0 && !WindowShouldClose()) {
-
-        int win_count[TOTAL_SCRIPTS] = {0};
-        int timeouts = 0;
-        for (int m = 0; m < total_played && m < 64; m++) {
-            bool found = false;
-            for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-                if (strcmp(match_winners[m], script_labels[s]) == 0) {
-                    win_count[s]++;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) timeouts++;
-        }
-
-        printf("\n=== SESSION RESULTS (%d matches) ===\n", total_played);
-        for (int m = 0; m < total_played && m < 64; m++)
-            printf("  Match %2d: %s\n", m + 1, match_winners[m]);
-        printf("\n--- Wins ---\n");
-        for (int s = 0; s < TOTAL_SCRIPTS; s++)
-            if (win_count[s] > 0)
-                printf("  %-18s %d\n", script_labels[s], win_count[s]);
-        if (timeouts > 0)
-            printf("  %-18s %d\n", "timeout", timeouts);
-        printf("====================================\n\n");
-        fflush(stdout);
-
-        while (!WindowShouldClose() && !IsKeyPressed(KEY_ESCAPE) &&
-               !IsKeyPressed(KEY_ENTER) && !IsKeyPressed(KEY_SPACE)) {
-
-            BeginDrawing();
-            ClearBackground(g_colors.bg_results);
-
-            int sw = GetRenderWidth();
-            int sh = GetRenderHeight();
-            int cx = sw / 2;
-            int cy = 60;
-
-            DrawText(TextFormat("SESSION COMPLETE  —  %d matches", total_played),
-                     cx - MeasureText(TextFormat("SESSION COMPLETE  —  %d matches",
-                                                 total_played), 36) / 2,
-                     cy, 36, WHITE);
-            cy += 58;
-
-            int cols   = 3;
-            int col_w  = sw / cols;
-            for (int m = 0; m < total_played && m < 64; m++) {
-                int col = m % cols;
-                int row = m / cols;
-                int tx  = col * col_w + 40;
-                int ty  = cy + row * 26;
-
-                Color wc = LIGHTGRAY;
+                /* Keep each opponent team populated independently. */
                 for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-                    if (strcmp(match_winners[m], script_labels[s]) == 0) {
-                        wc = g_colors.team[s];
-                        break;
+                    if (s == LLM_SCRIPT_IDX) continue;
+                    if (ms.spawn_count[s] > 0 && alive[s] == 0)
+                        respawn_team(s, &gcfg, arena_half_x, arena_half_z);
+                }
+
+                bool llm_dead = (ms.spawn_count[LLM_SCRIPT_IDX] > 0) &&
+                                (alive[LLM_SCRIPT_IDX] == 0);
+                if (llm_dead || force_deploy) {
+                    if (force_deploy) kill_team(LLM_SCRIPT_IDX);
+                    if (gcfg.use_llm)
+                        submit_epoch_telemetry(&ms, alive, generation, epoch_time,
+                                               llm_pending_error);
+                    /* respawn_team reloads bot_llm.py from disk, deploying the
+                     * newest version generated in the background. */
+                    respawn_team(LLM_SCRIPT_IDX, &gcfg,
+                                 arena_half_x, arena_half_z);
+                    if (gcfg.use_llm) {
+                        generation++;
+                        epoch_time = 0.0f;
+                        update_reset_llm_stats();
+                        update_telemetry_reset();
+                        update_clear_runtime_error();
+
+                        char gen_err[512] = {0};
+                        if (llm_bot_poll_gen_error(gen_err, sizeof(gen_err)))
+                            strncpy(llm_pending_error, gen_err,
+                                    sizeof(llm_pending_error) - 1);
+                        else if (llm_bot_poll_ready())
+                            llm_pending_error[0] = '\0';
                     }
                 }
-                DrawText(TextFormat("%2d. %-18s", m + 1, match_winners[m]),
-                         tx, ty, 20, wc);
             }
+        } /* end main loop */
 
-            int tally_x = sw - 260;
-            int tally_y = cy;
-            DrawText("--- WINS ---", tally_x, tally_y, 22, GRAY);
-            tally_y += 30;
-            for (int s = 0; s < TOTAL_SCRIPTS; s++) {
-                if (win_count[s] == 0) continue;
-                DrawText(TextFormat("%-18s %d", script_labels[s], win_count[s]),
-                         tally_x, tally_y, 22, g_colors.team[s]);
-                tally_y += 28;
-            }
-            if (timeouts > 0) {
-                DrawText(TextFormat("%-18s %d", "timeout", timeouts),
-                         tally_x, tally_y, 22, GRAY);
-            }
-
-            DrawText("Press ENTER / SPACE / ESC to continue",
-                     cx - 200, sh - 40, 22, DARKGRAY);
-
-            EndDrawing();
-        }
-    }
+    match_teardown();
 
     if (gcfg.use_llm)
         llm_bot_shutdown();
