@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <math.h>
+#include <ctype.h>
 
 #define SCRIPT_BUF_SIZE   (32  * 1024)
 #define RESPONSE_BUF_SIZE (128 * 1024)
@@ -478,10 +479,66 @@ static void append_text(char *dst, int dst_size, int *len_io, const char *fmt, .
 }
 
 /* ----------------------------------------------------------------------- */
+/* Copy `src` into `dst`, blanking out Python comments (everything from an
+ * unquoted '#' to end-of-line). Minimal quote tracking keeps '#' that appears
+ * inside string literals. This stops the static checks below from tripping on
+ * example/pitfall text in the COOKBOOK comment block (e.g. a comment that
+ * literally reads `BAD: scan = scan(0)`). */
+static void strip_py_comments(const char *src, char *dst, int dst_size) {
+    int di = 0;
+    char quote = 0;
+    for (const char *p = src; *p && di < dst_size - 1; p++) {
+        char c = *p;
+        if (quote) {
+            if (c == '\\' && p[1]) {
+                dst[di++] = c;
+                if (di < dst_size - 1) dst[di++] = p[1];
+                p++;
+                continue;
+            }
+            dst[di++] = c;
+            if (c == quote) quote = 0;
+        } else if (c == '#') {
+            while (p[1] && p[1] != '\n') p++;   /* drop the comment body */
+        } else {
+            if (c == '\'' || c == '"') quote = c;
+            dst[di++] = c;
+        }
+    }
+    dst[di] = '\0';
+}
+
+/* ----------------------------------------------------------------------- */
+/* Return true if `script` contains a top-level assignment to the EXACT
+ * identifier `name` (i.e. `name = ...`), as opposed to a variable whose name
+ * merely ends with those characters (e.g. `last_scan = scan(0)` is fine).
+ * We require a non-identifier char (or start of buffer) immediately before
+ * the name and a single `=` (not `==`) after optional spaces. */
+static bool assigns_to_name(const char *script, const char *name) {
+    size_t nlen = strlen(name);
+    const char *p = script;
+    while ((p = strstr(p, name)) != NULL) {
+        bool left_ok = (p == script) ||
+                       !(isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '.');
+        const char *q = p + nlen;
+        while (*q == ' ' || *q == '\t') q++;
+        bool right_ok = (*q == '=' && q[1] != '=');
+        if (left_ok && right_ok) return true;
+        p += nlen;
+    }
+    return false;
+}
+
+/* ----------------------------------------------------------------------- */
 /* Detect patterns in a GENERATED Python script that break at runtime. */
-static void detect_generated_bugs(const char *script, char *hint, int hint_size) {
+static void detect_generated_bugs(const char *script_raw, char *hint, int hint_size) {
     hint[0] = '\0';
-    if (!script) return;
+    if (!script_raw) return;
+
+    /* Work on a comment-stripped copy so the COOKBOOK pitfall examples
+     * (which intentionally contain BAD patterns) do not trip the checks. */
+    static char script[SCRIPT_BUF_SIZE];   /* generation runs single-threaded */
+    strip_py_comments(script_raw, script, SCRIPT_BUF_SIZE);
 
     /* Lua keyword leakage: model emitted Lua instead of Python */
     if (strstr(script, "\nlocal ") || strncmp(script, "local ", 6) == 0) {
@@ -506,27 +563,31 @@ static void detect_generated_bugs(const char *script, char *hint, int hint_size)
             "These are injected as plain globals: use self_x, self_z, self_hp, self_team.");
         return;
     }
-    /* API name shadowing: 'scan =' or 'move =' or 'fire =' as assignment */
+    /* API name shadowing: assignment to the EXACT name of an API function.
+     * Word-boundary aware so legit names like `last_scan = scan(0)` are NOT
+     * flagged. */
     {
-        const char *shadows[] = {"scan =", "scan=", "move =", "move=", "fire =", "fire=", NULL};
-        for (int i = 0; shadows[i]; i++) {
-            if (strstr(script, shadows[i])) {
+        const char *api[] = {"scan", "move", "fire_weapon", "fire", NULL};
+        for (int i = 0; api[i]; i++) {
+            if (assigns_to_name(script, api[i])) {
                 snprintf(hint, (size_t)hint_size,
-                    "Your script assigns to the name '%.*s' which shadows the "
+                    "Your script assigns to the name '%s' which shadows the "
                     "game API function. Use a different variable name, "
                     "e.g. 'targets = scan(0)' not 'scan = scan(0)'.",
-                    (int)(strchr(shadows[i], ' ') ? strchr(shadows[i], ' ') - shadows[i]
-                                                  : strchr(shadows[i], '=') - shadows[i]),
-                    shadows[i]);
+                    api[i]);
                 return;
             }
         }
     }
 }
 
-static void build_known_bugs(const char *current, char *known_bugs, int size) {
+static void build_known_bugs(const char *current_raw, char *known_bugs, int size) {
     int kb_len = 0;
     known_bugs[0] = '\0';
+
+    /* Comment-stripped copy so cookbook examples don't register as bugs. */
+    static char current[SCRIPT_BUF_SIZE];   /* generation runs single-threaded */
+    strip_py_comments(current_raw, current, SCRIPT_BUF_SIZE);
 
     if (strstr(current, "\nlocal ") || strncmp(current, "local ", 6) == 0) {
         kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
@@ -535,7 +596,7 @@ static void build_known_bugs(const char *current, char *known_bugs, int size) {
             "Declare variables with plain assignment: x = 0\n\n");
     }
 
-    if (strstr(current, "scan =") || strstr(current, "scan=")) {
+    if (assigns_to_name(current, "scan")) {
         kb_len += snprintf(known_bugs + kb_len, (size_t)(size - kb_len),
             "=== CRITICAL BUG: variable shadows scan() API ===\n"
             "The script assigns to 'scan' which shadows the scan() API function.\n"
@@ -645,6 +706,17 @@ static void build_system_prompt(char *dst, int dst_size) {
         "               if condition:  _heading = new_val   # now it is a global assignment\n"
         "               move(math.cos(_heading), ...)       # always reads the global\n"
         "\n"
+        "=== Examples / cookbook block ===\n"
+        "The current script ends with a long comment block titled\n"
+        "  '# EXAMPLES / COOKBOOK ...'\n"
+        "containing reference Python patterns (init shape, _wall_avoid,\n"
+        "_nearest_enemy, fire patterns, range-tiered fire_weapon, common\n"
+        "pitfalls). PRESERVE that whole comment block VERBATIM at the bottom of\n"
+        "your output. It is the working set of patterns for the next iteration;\n"
+        "deleting it costs you context on the next regeneration. Use those\n"
+        "examples as the scaffolding for init()/think(); do not invent new\n"
+        "untested patterns.\n"
+        "\n"
         "=== Smoke-test combat check (post-generation validation) ===\n"
         "After generation we run the script in an isolated Python interpreter with stub\n"
         "move/fire/fire_weapon/scan, simulate 3.0 seconds (60 frames at dt=0.05s),\n"
@@ -662,7 +734,8 @@ static void build_system_prompt(char *dst, int dst_size) {
         "\n"
         "=== Output format ===\n"
         "Return ONLY the Python script. No markdown fences, no commentary, no reasoning prose.\n"
-        "The script must define init() returning a dict, and think(dt).\n");
+        "The script must define init() returning a dict, and think(dt).\n"
+        "Keep the EXAMPLES / COOKBOOK comment block at the bottom verbatim.\n");
 }
 
 typedef struct {
@@ -762,9 +835,11 @@ static void *generate_thread(void *arg) {
         if (!strstr(python, "def ")) {
             snprintf(validation_err, sizeof(validation_err),
                      "generated response did not contain Python function definitions");
+            llm_bot_log(LLOG_ERR, "!! no def: %s", validation_err);
         } else if (static_hint[0] != '\0') {
             snprintf(validation_err, sizeof(validation_err),
                      "static check: %s", static_hint);
+            llm_bot_log(LLOG_ERR, "!! static check: %s", static_hint);
         } else {
             /* Syntax check on the in-memory buffer */
             char syntax_err[512] = "";
@@ -854,7 +929,8 @@ static void *generate_thread(void *arg) {
         }
 
         if (!success && attempt < 2) {
-            llm_bot_log(LLOG_WARN, "!! validation failed, retrying now");
+            llm_bot_log(LLOG_WARN, "!! validation failed: %s", validation_err);
+            llm_bot_log(LLOG_WARN, "!! retrying now");
             retry_user_prompt[0] = '\0';
             int retry_len = 0;
             append_text(retry_user_prompt, (int)sizeof(retry_user_prompt), &retry_len,
@@ -872,6 +948,8 @@ static void *generate_thread(void *arg) {
     }
 
     if (!success) {
+        llm_bot_log(LLOG_ERR, "!! generation FAILED after retries: %s",
+                    validation_err[0] ? validation_err : "generation failed");
         pthread_mutex_lock(&g_mutex);
         strncpy(g_gen_error, validation_err[0] ? validation_err : "generation failed",
                 sizeof(g_gen_error) - 1);

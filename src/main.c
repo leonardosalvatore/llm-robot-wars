@@ -1539,6 +1539,13 @@ int main(void) {
                 if (IsKeyPressed(KEY_F))      ToggleFullscreen();
                 if (IsKeyPressed(KEY_T))      show_scan_lines = !show_scan_lines;
                 if (IsKeyPressed(KEY_R))      { restart_match = true; match_over = true; }
+                if (IsKeyPressed(KEY_C)) {
+                    camera->position   = (Vector3){40.0f, 40.0f, 40.0f};
+                    camera->target     = (Vector3){ 0.0f,  0.0f,  0.0f};
+                    camera->up         = (Vector3){ 0.0f,  1.0f,  0.0f};
+                    camera->fovy       = 50.0f;
+                    camera->projection = CAMERA_PERSPECTIVE;
+                }
                 if (IsKeyPressed(KEY_ESCAPE)) { outer_done    = true; match_over = true; }
                 if (IsKeyPressed(KEY_I)) {
                     if (camera->projection == CAMERA_PERSPECTIVE) {
@@ -1725,11 +1732,11 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint = gcfg.use_llm
-                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  T scan  F full  R restart  ESC quit"
+                    ? TextFormat("WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  C reset cam  T scan  F full  R restart  ESC quit"
                                  "   Match %d/%d  %.0fs left",
                                  match_idx + 1, gcfg.num_matches,
                                  (double)(gcfg.match_duration - match_time))
-                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  T scan  F full  R restart  ESC quit";
+                    : "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  I iso  C reset cam  T scan  F full  R restart  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 int hud_top = 34;
