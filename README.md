@@ -4,7 +4,7 @@ A bot-battle arena built with C, Llama.cpp, Raylib, and Python.
 Bots are scripted in Python and fight it out in a 3D arena. 
 Only one class of robots are generated and improved by a local llama.cpp LLM server.
 
-https://youtube.com/shorts/_TR7kF-zSt4?feature=share
+https://www.youtube.com/shorts/6yXtlWL2qBU
 
 
 ## Author
