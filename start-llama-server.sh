@@ -16,12 +16,22 @@ DEFAULT_MODEL="${LLAMA_DIR}/qwen2.5-coder-7b-instruct-q8_0.gguf"
 
 MODEL="${1:-$DEFAULT_MODEL}"
 
-# Speculative-decoding draft model: the tiny 0.5B drafts tokens that the 7B
-# verifies in batch. Code is highly predictable so this usually speeds up
-# generation noticeably. NOTE: the draft model must share the target's
-# tokenizer/vocab. If llama-server aborts with a vocab-mismatch error,
-# leave DRAFT_MODEL empty (or point it at a qwen2.5-coder-0.5b GGUF).
-DRAFT_MODEL="${LLAMA_DIR}/ruvltra-claude-code-0.5b-q4_k_m.gguf"
+# Speculative decoding.
+#
+# Draft-model speculation (a tiny model drafts, the 7B verifies) is DISABLED
+# here because this particular qwen2.5-coder-7b GGUF ships a nonstandard vocab
+# (note the '</s>' @ 128247 warning at load) that does not match the stock
+# Qwen2.5-0.5B draft -> "target and draft vocabs are not compatible".
+# To use a draft model you'd need a matched pair (e.g. b9940's built-in
+# preset --fim-qwen-7b-spec, which downloads a matching 7B + 0.5B).
+#DRAFT_MODEL="${LLAMA_DIR}/ruvltra-claude-code-0.5b-q4_k_m.gguf"
+DRAFT_MODEL=""
+
+# Instead we use N-GRAM (prompt-lookup) speculation: no draft model, no vocab
+# constraint. It drafts tokens by matching repeated n-grams already in the
+# context. Ideal here because each regeneration copies large verbatim spans
+# (the current script + the cookbook block) straight from the prompt.
+NGRAM_SPEC=1
 
 if [ -z "$MODEL" ]; then
     echo "ERROR: no model specified." >&2
@@ -42,18 +52,25 @@ ln -s /opt/rocm/lib/librocblas.so.4 ./librocblas.so.5 2>/dev/null
 
 export LD_LIBRARY_PATH=.:/opt/rocm/lib:/opt/rocm/lib64:$LD_LIBRARY_PATH
 
-# Speculative-decoding flags, added only when a valid draft model is present.
-DRAFT_ARGS=()
+# Speculative-decoding flags. --spec-type defaults to 'none' in b9940, so it
+# must be opted into explicitly.
+SPEC_ARGS=()
 if [ -n "$DRAFT_MODEL" ] && [ -f "$DRAFT_MODEL" ]; then
-    # b9940 renamed --draft-max/--draft-min to --spec-draft-n-max/--spec-draft-n-min.
-    DRAFT_ARGS=(--model-draft "$DRAFT_MODEL" -ngld 99 --spec-draft-n-max 16 --spec-draft-n-min 1)
+    # Draft-model speculation (needs a vocab-matched draft; see note above).
+    SPEC_ARGS=(--spec-type draft-simple --model-draft "$DRAFT_MODEL" -ngld 99 \
+               --spec-draft-n-max 16 --spec-draft-n-min 1)
+elif [ "${NGRAM_SPEC:-0}" = "1" ]; then
+    # N-gram / prompt-lookup speculation: no draft model, no vocab constraint.
+    SPEC_ARGS=(--spec-type ngram-simple)
 fi
 
 echo "Starting llama-server..."
 echo "  Binary : ${LLAMA_DIR}/llama-server"
 echo "  Model  : ${MODEL}"
-if [ ${#DRAFT_ARGS[@]} -gt 0 ]; then
+if [ -n "$DRAFT_MODEL" ] && [ -f "$DRAFT_MODEL" ]; then
     echo "  Draft  : ${DRAFT_MODEL}"
+elif [ ${#SPEC_ARGS[@]} -gt 0 ]; then
+    echo "  Spec   : ngram-simple (prompt-lookup, no draft model)"
 fi
 echo "  Port   : 8080"
 echo ""
@@ -67,4 +84,4 @@ HIP_VISIBLE_DEVICES=0 HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     -c 8192 \
     -fa on \
     --cache-reuse 256 \
-    "${DRAFT_ARGS[@]}"
+    "${SPEC_ARGS[@]}"

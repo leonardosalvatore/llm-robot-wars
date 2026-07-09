@@ -14,10 +14,12 @@
 #define HTTP_BUF_SIZE   (2 * 1024 * 1024)
 #define CONNECT_TIMEOUT  10
 #define GENERATE_TIMEOUT 300
-/* Bot scripts are only a few hundred lines; capping output tokens well below
- * the old 8192 bounds worst-case decode time. Non-reasoning coder models do
- * not need a large budget here. */
-#define MAX_GEN_TOKENS   2048
+/* Caps worst-case decode time vs the old 8192. The qwen2.5-coder output
+ * (init()/think() + the verbatim cookbook block) naturally lands around
+ * ~2200 tokens, so keep headroom above that to avoid truncating a good
+ * script mid-cookbook (which would fail the syntax check and force a retry).
+ * The model stops on its own well before this, so it is only a safety cap. */
+#define MAX_GEN_TOKENS   4096
 
 /* ----------------------------------------------------------------------- */
 static int tcp_connect(const char *host, int port, int timeout_sec) {
