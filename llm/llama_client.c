@@ -14,6 +14,10 @@
 #define HTTP_BUF_SIZE   (2 * 1024 * 1024)
 #define CONNECT_TIMEOUT  10
 #define GENERATE_TIMEOUT 300
+/* Bot scripts are only a few hundred lines; capping output tokens well below
+ * the old 8192 bounds worst-case decode time. Non-reasoning coder models do
+ * not need a large budget here. */
+#define MAX_GEN_TOKENS   2048
 
 /* ----------------------------------------------------------------------- */
 static int tcp_connect(const char *host, int port, int timeout_sec) {
@@ -211,8 +215,8 @@ int llama_generate(const char *host, int port,
         "{\"role\":\"system\",\"content\":\"%s\"},"
         "{\"role\":\"user\",\"content\":\"%s\"}"
         "],"
-        "\"max_tokens\":8192,\"stream\":false}",
-        esc_system, esc_user);
+        "\"max_tokens\":%d,\"cache_prompt\":true,\"stream\":false}",
+        esc_system, esc_user, MAX_GEN_TOKENS);
     free(esc_system);
     free(esc_user);
 
