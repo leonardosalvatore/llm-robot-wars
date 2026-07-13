@@ -111,6 +111,23 @@ void update_scripts(Bot *bots, int count, float dt) {
         PyDict_SetItemString(ns, "self_hp",      PyFloat_FromDouble((double)b->hp));
         PyDict_SetItemString(ns, "self_max_hp",  PyFloat_FromDouble((double)b->config.max_hp));
 
+        /* Navigation + coordination context (added for smarter bots). */
+        {
+            PyObject *v_id = PyLong_FromLong((long)i);
+            if (v_id) { PyDict_SetItemString(ns, "self_id", v_id); Py_DECREF(v_id); }
+            PyObject *v_ax = PyFloat_FromDouble((double)g_arena_half_x);
+            if (v_ax) { PyDict_SetItemString(ns, "arena_half_x", v_ax); Py_DECREF(v_ax); }
+            PyObject *v_az = PyFloat_FromDouble((double)g_arena_half_z);
+            if (v_az) { PyDict_SetItemString(ns, "arena_half_z", v_az); Py_DECREF(v_az); }
+
+            /* Shared per-team blackboard: all bots on the same team get the
+             * SAME dict object, so they can coordinate via reads/writes. The
+             * dict takes its own reference; the accessor returns a borrowed
+             * ref so we do not DECREF here. */
+            PyObject *tm = scripting_team_mem(b->script_id);
+            if (tm) PyDict_SetItemString(ns, "team_mem", tm);
+        }
+
         PyObject *think_fn = PyDict_GetItemString(ns, "think");
         if (!think_fn || !PyCallable_Check(think_fn)) continue;
 

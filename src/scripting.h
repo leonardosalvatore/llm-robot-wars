@@ -31,6 +31,17 @@ void scripting_call_init(PyObject *ns, BotConfig *out);
  * Must be called immediately before invoking think() on a bot's namespace. */
 void scripting_set_current_bot(int idx);
 
+/* Shared per-team blackboard. Returns a borrowed reference to a persistent
+ * Python dict that is the SAME object for every bot with the given script_id,
+ * letting a team coordinate (focus-fire target, rally point, roles, ...).
+ * The dict is created lazily on first use. Returns NULL only on allocation
+ * failure. Must be called while holding the GIL. */
+PyObject *scripting_team_mem(int script_id);
+
+/* Clear all per-team blackboards. Call between matches so shared state does
+ * not leak from one match into the next. */
+void scripting_reset_team_mem(void);
+
 /* Check Python syntax of a script file without executing it.
  * Returns true if syntax is OK; false and writes error into err_buf otherwise. */
 bool scripting_check_syntax_file(const char *path, char *err_buf, int err_size);

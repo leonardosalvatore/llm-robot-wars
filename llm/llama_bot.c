@@ -289,6 +289,11 @@ static void smoke_set_globals(PyObject *ns, double x, double z,
     PyDict_SetItemString(ns, "self_team",   PyLong_FromLong(6));
     PyDict_SetItemString(ns, "self_hp",     PyFloat_FromDouble(hp));
     PyDict_SetItemString(ns, "self_max_hp", PyFloat_FromDouble(max_hp));
+    /* Mirror the runtime navigation/coordination globals so generated scripts
+     * that read them do not NameError during validation. */
+    PyDict_SetItemString(ns, "self_id",      PyLong_FromLong(0));
+    PyDict_SetItemString(ns, "arena_half_x", PyFloat_FromDouble(30.0));
+    PyDict_SetItemString(ns, "arena_half_z", PyFloat_FromDouble(25.0));
 }
 
 static void smoke_init_arena(void) {
@@ -367,6 +372,15 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
         return false;
     }
     Py_DECREF(exec_result);
+
+    /* Inject the shared blackboard AFTER file-scope exec (mirroring runtime,
+     * where team_mem is only present during think()), so scripts that read it
+     * at module scope are still rejected. One persistent object for the run so
+     * cross-frame coordination patterns behave as they would in a match. */
+    {
+        PyObject *tm = PyDict_New();
+        if (tm) { PyDict_SetItemString(ns, "team_mem", tm); Py_DECREF(tm); }
+    }
 
     /* Stage 2: init() must exist and return a dict */
     smoke_set_globals(ns, 0.0, 0.0, 250.0, 250.0);
@@ -626,6 +640,36 @@ static void build_system_prompt(char *dst, int dst_size) {
         "  self_weapons          -- list of weapon-type strings, 0-based length 1..4\n"
         "  self_weapon_count     -- integer 1..4\n"
         "  self_max_speed        -- current max linear speed in units/second (after weight)\n"
+        "  self_id               -- unique integer id of THIS bot, stable for the match.\n"
+        "                       -- Use it to split roles across the team, e.g. self_id %% 3.\n"
+        "  arena_half_x          -- arena spans x in [-arena_half_x, +arena_half_x]; centre is 0.\n"
+        "  arena_half_z          -- arena spans z in [-arena_half_z, +arena_half_z]; centre is (0,0).\n"
+        "  team_mem              -- a shared dict, the SAME object for every bot on your team.\n"
+        "                       -- Read/write it to coordinate (focus target, rally point, roles).\n"
+        "                       -- It PERSISTS across frames within a match. To stay independent\n"
+        "                       -- of bot update order, prefer reading values written LAST frame.\n"
+        "                       -- Always use team_mem.get(key, default); never assume a key exists.\n"
+        "\n"
+        "=== Navigation (use arena bounds + scan to move well) ===\n"
+        "The arena is centred on (0,0) and bounded by arena_half_x / arena_half_z. Ramming the\n"
+        "border wastes time (tracked as arena_bumps) and hugging walls hides you from enemies.\n"
+        "- If |self_x| or |self_z| is close to its arena_half_*, add a pull toward centre:\n"
+        "    cx = -self_x / max(arena_half_x, 1.0); cz = -self_z / max(arena_half_z, 1.0)\n"
+        "  and blend it into your move() vector, stronger the closer you are to the edge.\n"
+        "- Keep the wall-avoidance push from scan() walls; combine it with your target vector.\n"
+        "- Unstick: if you keep requesting move() but your position barely changes (compare a\n"
+        "  cached self_x/self_z from a few frames ago), you are jammed; pick a fresh heading.\n"
+        "\n"
+        "=== Team coordination (use team_mem + self_id + scan) ===\n"
+        "scan() returns teammates too (entries where team == self_team). Coordinate instead of\n"
+        "each bot fighting alone:\n"
+        "- FOCUS FIRE: elect one shared enemy in team_mem (e.g. team_mem[\"focus_x\"]/[\"focus_z\"])\n"
+        "  and have everyone shoot it, so targets die faster. Refresh the pick periodically.\n"
+        "- ROLE SPLIT: use self_id %% N to assign roles: some bots push in (attack), others hang\n"
+        "  back or flank (defence). Read/write role intent through team_mem when useful.\n"
+        "- SPACING: steer away from nearby teammates so the team does not clump into one target.\n"
+        "- REGROUP: when outnumbered or low HP, fall back toward a shared rally point (e.g. the\n"
+        "  team centroid, or centre (0,0)) stored in team_mem so the team defends together.\n"
         "\n"
         "init() must return a dict with these fields:\n"
         "  \"locomotion\": \"wheels\" | \"tracks\" | \"4legs\" | \"2legs\"\n"

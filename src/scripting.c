@@ -209,6 +209,33 @@ void scripting_set_current_bot(int idx) {
 }
 
 /* -------------------------------------------------------------------------
+ * Shared per-team blackboard (team_mem).
+ * One persistent dict per script slot, created on first use. Every bot with
+ * the same script_id is handed the SAME dict object so a team can coordinate.
+ * Requires the GIL to be held.
+ * ------------------------------------------------------------------------- */
+static PyObject *g_team_mem[TOTAL_SCRIPTS] = {0};
+
+PyObject *scripting_team_mem(int script_id) {
+    if (script_id < 0 || script_id >= TOTAL_SCRIPTS) return NULL;
+    if (!g_team_mem[script_id]) {
+        g_team_mem[script_id] = PyDict_New();
+    }
+    return g_team_mem[script_id]; /* borrowed reference */
+}
+
+void scripting_reset_team_mem(void) {
+    if (!Py_IsInitialized()) return;
+    PyGILState_STATE gs = PyGILState_Ensure();
+    for (int i = 0; i < TOTAL_SCRIPTS; i++) {
+        if (g_team_mem[i]) {
+            PyDict_Clear(g_team_mem[i]);
+        }
+    }
+    PyGILState_Release(gs);
+}
+
+/* -------------------------------------------------------------------------
  * Python API callbacks
  * ------------------------------------------------------------------------- */
 static int try_fire_weapon(Bot *b, int bot_idx, int w, float dir_x, float dir_z) {
@@ -434,6 +461,8 @@ void scripting_init(void) {
 void scripting_shutdown(void) {
     /* Release bot namespaces for the current match. */
     if (!Py_IsInitialized()) return;
+    /* Wipe shared team blackboards so state does not leak between matches. */
+    scripting_reset_team_mem();
     for (int i = 0; i < g_bot_count; i++) {
         if (g_bots[i].py_ns) {
             PyGILState_STATE gs = PyGILState_Ensure();

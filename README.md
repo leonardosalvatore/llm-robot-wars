@@ -35,6 +35,23 @@ To use the LLM-driven bot, start a llama.cpp server first:
 ./start-llama-server.sh
 ```
 
+## LLM bot context
+
+Between generations the LLM rewrites `scripts/bot_llm.py`. Besides the combat
+API (`move`, `fire`, `fire_weapon`, `scan`) and the `self_*` state, each bot's
+`think(dt)` receives context for smarter behaviour:
+
+- `self_id` — unique, stable id for the bot; used to split roles across the team.
+- `arena_half_x` / `arena_half_z` — arena bounds (centred on `(0,0)`), so bots can
+  steer toward the middle instead of ramming the border.
+- `team_mem` — a shared dict, the same object for every bot on the team, used to
+  coordinate (e.g. elect a focus-fire target, pick a rally point, assign roles).
+
+These let generated bots navigate the ground and coordinate attack/defence with
+teammates. The `EXAMPLES / COOKBOOK` block at the bottom of `scripts/bot_llm.py`
+carries reference patterns (steer-to-center, teammate separation, shared focus
+fire, role split) that the model reuses on each regeneration.
+
 One line for reset, build and executing.
 
 ```bash

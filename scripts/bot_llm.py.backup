@@ -5,10 +5,12 @@
 # material the LLM is asked to KEEP VERBATIM on every regeneration so that
 # the next iteration always has a working set of Python patterns to copy.
 #
-# Active strategy:
+# Active strategy (coordinated):
 #   wheels + flat body + 2x MachineGun (left/right) + 2x Laser (top_front/top_rear).
-#   Chase the nearest enemy and hose it with everything; when self_hp drops
-#   below 30% pick a random direction and keep firing while fleeing.
+#   Bots steer toward the arena centre (never hug the border), keep spacing from
+#   teammates, and CONCENTRATE FIRE on one shared enemy chosen via team_mem.
+#   Even self_id push in (attack); odd self_id kite at range (defence). When
+#   self_hp drops below 30% they fall back toward centre and keep firing.
 
 import math
 import random
@@ -56,6 +58,43 @@ def _nearest_enemy(targets):
     return best
 
 
+def _steer_to_center():
+    # Pull toward (0,0), stronger the closer we are to the arena border.
+    hx = max(arena_half_x, 1.0)
+    hz = max(arena_half_z, 1.0)
+    fx = self_x / hx  # -1 (edge) .. 0 (centre) .. 1 (edge)
+    fz = self_z / hz
+    return -fx * abs(fx) * 2.0, -fz * abs(fz) * 2.0
+
+
+def _separation(targets):
+    # Push away from nearby teammates so the swarm does not clump.
+    sx, sz = 0.0, 0.0
+    for t in targets:
+        if t["type"] == "bot" and t["team"] == self_team and t["distance"] < 3.0:
+            dx = self_x - t["x"]
+            dz = self_z - t["z"]
+            d = max(t["distance"], 0.05)
+            sx += dx / (d * d)
+            sz += dz / (d * d)
+    return sx, sz
+
+
+def _shared_focus(targets, dt):
+    # Elect ONE enemy for the whole team via team_mem so fire concentrates.
+    # The stored pick's priority distance decays so a dead/stale target is
+    # replaced; the teammate nearest the current focus keeps it fresh.
+    enemy = _nearest_enemy(targets)
+    best_d = team_mem.get("focus_d", float("inf")) + 40.0 * dt
+    if enemy is not None and enemy["distance"] < best_d:
+        team_mem["focus_x"] = enemy["x"]
+        team_mem["focus_z"] = enemy["z"]
+        team_mem["focus_d"] = enemy["distance"]
+    else:
+        team_mem["focus_d"] = best_d
+    return team_mem.get("focus_x"), team_mem.get("focus_z")
+
+
 def think(dt):
     global _panic_angle, _panic_timer
 
@@ -63,27 +102,36 @@ def think(dt):
 
     targets = scan(0)
     ax, az = _wall_avoid(targets)
+    cx, cz = _steer_to_center()
+    sx, sz = _separation(targets)
+    fx, fz = _shared_focus(targets, dt)
     enemy = _nearest_enemy(targets)
 
+    aggressive = (self_id % 2 == 0)  # even ids attack, odd ids defend/kite
+
     if self_hp < self_max_hp * LOW_HP_FRAC:
-        if _panic_timer <= 0.0:
-            _panic_angle = random.uniform(0, math.pi * 2)
-            _panic_timer = 0.6 + random.random() * 0.8
-        move(math.cos(_panic_angle) + ax, math.sin(_panic_angle) + az)
-        if enemy is not None and enemy["distance"] < 12.0:
-            fire(enemy["x"] - self_x, enemy["z"] - self_z)
+        # Fall back toward centre/rally with the team, still firing on focus.
+        move(cx + ax + sx, cz + az + sz)
+        if fx is not None:
+            fire(fx - self_x, fz - self_z)
         return
 
     if enemy is not None:
-        dx = enemy["x"] - self_x
-        dz = enemy["z"] - self_z
-        move(dx + ax, dz + az)
+        tx = fx if fx is not None else enemy["x"]
+        tz = fz if fz is not None else enemy["z"]
+        dx = tx - self_x
+        dz = tz - self_z
+        if aggressive or enemy["distance"] > 10.0:
+            move(dx + ax + cx + sx, dz + az + cz + sz)   # close in / hold line
+        else:
+            move(-dx + ax + cx + sx, -dz + az + cz + sz)  # defenders kite out
         fire(dx, dz)
     else:
         if _panic_timer <= 0.0:
             _panic_angle = random.uniform(0, math.pi * 2)
             _panic_timer = 1.0 + random.random()
-        move(math.cos(_panic_angle) + ax, math.sin(_panic_angle) + az)
+        move(math.cos(_panic_angle) + ax + cx + sx,
+             math.sin(_panic_angle) + az + cz + sz)
 
 
 # ============================================================================
@@ -165,12 +213,62 @@ def think(dt):
 # else:
 #     fire(dx, dz)                  # mid range: everything
 #
+# 6b) NAVIGATION: use arena_half_x / arena_half_z (arena is centred on 0,0) to
+#     stop ramming the border. Add a centre-pull to your move() vector that
+#     grows near the edge, and keep spacing from teammates.
+# ----------------------------------------------------------------------------
+# def _steer_to_center():
+#     hx = max(arena_half_x, 1.0)
+#     hz = max(arena_half_z, 1.0)
+#     fx = self_x / hx            # -1 at one edge, 0 centre, +1 other edge
+#     fz = self_z / hz
+#     return -fx * abs(fx) * 2.0, -fz * abs(fz) * 2.0
+#
+# def _separation(targets):       # push away from nearby TEAMMATES
+#     sx, sz = 0.0, 0.0
+#     for t in targets:
+#         if t["type"] == "bot" and t["team"] == self_team and t["distance"] < 3.0:
+#             dx = self_x - t["x"]; dz = self_z - t["z"]
+#             d = max(t["distance"], 0.05)
+#             sx += dx / (d * d);  sz += dz / (d * d)
+#     return sx, sz
+# # then blend all steering vectors:  move(dx + ax + cx + sx, dz + az + cz + sz)
+#
+# 6c) TEAM COORDINATION via team_mem (a shared dict, SAME object for the team).
+#     Always use team_mem.get(key, default); never assume a key exists.
+#     FOCUS FIRE: elect one enemy the whole team shoots so targets die fast.
+# ----------------------------------------------------------------------------
+# def _shared_focus(targets, dt):
+#     enemy = _nearest_enemy(targets)
+#     best_d = team_mem.get("focus_d", float("inf")) + 40.0 * dt   # decay pick
+#     if enemy is not None and enemy["distance"] < best_d:
+#         team_mem["focus_x"] = enemy["x"]
+#         team_mem["focus_z"] = enemy["z"]
+#         team_mem["focus_d"] = enemy["distance"]
+#     else:
+#         team_mem["focus_d"] = best_d
+#     return team_mem.get("focus_x"), team_mem.get("focus_z")
+# # in think(): fx, fz = _shared_focus(targets, dt)
+# #             if fx is not None: fire(fx - self_x, fz - self_z)
+#
+# 6d) ROLE SPLIT with self_id (unique per bot, stable for the match): send some
+#     bots in to brawl and keep others back to defend/flank.
+# ----------------------------------------------------------------------------
+# aggressive = (self_id % 2 == 0)          # even ids attack, odd ids kite
+# if aggressive or enemy["distance"] > 10.0:
+#     move(dx + ax + cx + sx, dz + az + cz + sz)     # close in
+# else:
+#     move(-dx + ax + cx + sx, -dz + az + cz + sz)   # kite away
+#
 # 6) PITFALLS that the smoke test will reject (each one models have hit):
 # ----------------------------------------------------------------------------
 #    * This is PYTHON, not Lua. No 'local', no 'then', no 'end', no '--' comments.
-#    * NEVER read self_x / self_z / self_team / self_hp at MODULE scope — they
-#      do not exist until think() runs. Only read them inside init()/think().
+#    * NEVER read self_x / self_z / self_team / self_hp / self_id /
+#      arena_half_x / arena_half_z / team_mem at MODULE scope — they do not
+#      exist until think() runs. Only read them inside think().
 #      (init() actually must NOT read them either; only think() should.)
+#    * team_mem is a shared dict: read with team_mem.get(key, default); never
+#      assume a key exists, and never rebind the name (team_mem = ... is wrong).
 #    * Module-level variables you ASSIGN inside think() need a 'global' line:
 #          _t = 0.0
 #          def think(dt):
