@@ -829,6 +829,25 @@ static void draw_wall_tapered_wires(float cx, float cy, float cz,
     DrawLine3D(tbl, bbl, col);
 }
 
+/* Flat ground arrow from (x,z) along `angle`, used by the T inspect overlay to
+ * show a bot's movement intent. */
+static void draw_intent_arrow(float x, float z, float angle,
+                              float len, float y, Color col)
+{
+    float tx = x + cosf(angle) * len;
+    float tz = z + sinf(angle) * len;
+    DrawLine3D((Vector3){x, y, z}, (Vector3){tx, y, tz}, col);
+
+    /* Two short barbs at the tip form the arrowhead. */
+    float bl = len * 0.30f;
+    float a1 = angle + 2.7f;   /* ~155 deg back-left  */
+    float a2 = angle - 2.7f;   /* ~155 deg back-right */
+    DrawLine3D((Vector3){tx, y, tz},
+               (Vector3){tx + cosf(a1) * bl, y, tz + sinf(a1) * bl}, col);
+    DrawLine3D((Vector3){tx, y, tz},
+               (Vector3){tx + cosf(a2) * bl, y, tz + sinf(a2) * bl}, col);
+}
+
 /* ----------------------------------------------------------------------- */
 /* Bounding-box dimensions used for placement on the chassis. The actual model
  * drawn by draw_weapon_at() is built from multiple primitives within this box,
@@ -1777,18 +1796,60 @@ int main(void) {
                         Color col = {b->r, b->g, b->b, b->a};
                         draw_bot(b->x, b->z, col, &b->config, &b->inertia);
 
-                        /* Scan lines (toggle with T) */
+                        /* Inspect overlay (toggle with T): dimmed scan lines,
+                         * movement-intent arrow, turret aim + target ring. */
                         if (show_scan_lines) {
                             float sy = 0.08f;
+
+                            /* E) Scan lines, dimmed so newer cues read clearly. */
                             for (int h = 0; h < b->inertia.scan_hit_count; h++) {
                                 Color sc = b->inertia.scan_hit_type[h] == 0
                                            ? g_colors.scan_enemy
                                            : g_colors.scan_wall;
+                                sc.a = (unsigned char)(sc.a * 0.30f);
                                 DrawLine3D(
                                     (Vector3){b->x, sy, b->z},
                                     (Vector3){b->inertia.scan_hit_x[h], sy,
                                               b->inertia.scan_hit_z[h]},
                                     sc);
+                            }
+
+                            /* A) Movement-intent arrow: where it wants to drive. */
+                            Color intent_col = b->inertia.move_requested
+                                             ? (Color){70, 200, 255, 235}
+                                             : (Color){70, 200, 255, 90};
+                            draw_intent_arrow(b->x, b->z,
+                                              b->inertia.desired_body_angle,
+                                              1.6f, sy + 0.02f, intent_col);
+
+                            /* B) Turret aim ray + highlight the targeted enemy.
+                             * The target is the scanned bot best aligned with
+                             * the current turret heading (within ~15 deg). */
+                            float ta   = b->inertia.turret_angle;
+                            float aimx = cosf(ta), aimz = sinf(ta);
+                            int   tgt  = -1;
+                            float best_align = 0.966f; /* cos(15 deg) */
+                            for (int h = 0; h < b->inertia.scan_hit_count; h++) {
+                                if (b->inertia.scan_hit_type[h] != 0) continue;
+                                float dx = b->inertia.scan_hit_x[h] - b->x;
+                                float dz = b->inertia.scan_hit_z[h] - b->z;
+                                float d  = sqrtf(dx * dx + dz * dz);
+                                if (d < 0.01f) continue;
+                                float align = (dx * aimx + dz * aimz) / d;
+                                if (align > best_align) { best_align = align; tgt = h; }
+                            }
+                            Color aim_col = {255, 210, 60, 230};
+                            if (tgt >= 0) {
+                                Vector3 tp = {b->inertia.scan_hit_x[tgt], sy + 0.02f,
+                                              b->inertia.scan_hit_z[tgt]};
+                                DrawLine3D((Vector3){b->x, sy + 0.02f, b->z},
+                                           tp, aim_col);
+                                DrawCircle3D(tp, 0.7f, (Vector3){1, 0, 0},
+                                             90.0f, aim_col);
+                            } else {
+                                DrawLine3D((Vector3){b->x, sy + 0.02f, b->z},
+                                           (Vector3){b->x + aimx * 1.2f, sy + 0.02f,
+                                                     b->z + aimz * 1.2f}, aim_col);
                             }
                         }
 
@@ -1837,6 +1898,34 @@ int main(void) {
                         }
                     }
 
+                    /* D) Team coordination: the shared focus-fire target the
+                     * LLM team elected in team_mem, with faint links from each
+                     * living LLM bot. Shows what the swarm is "thinking". */
+                    if (gcfg.use_llm && show_scan_lines) {
+                        float fx, fz;
+                        if (scripting_team_focus(LLM_SCRIPT_IDX, &fx, &fz)) {
+                            float fy = 0.10f;
+                            Vector3 fc = {fx, fy, fz};
+                            Color fcol = g_colors.team[LLM_SCRIPT_IDX];
+                            float pulse = 0.85f + 0.20f * sinf((float)GetTime() * 6.0f);
+
+                            DrawCircle3D(fc, 0.9f * pulse, (Vector3){1, 0, 0}, 90.0f, fcol);
+                            DrawCircle3D(fc, 1.5f * pulse, (Vector3){1, 0, 0}, 90.0f,
+                                         (Color){fcol.r, fcol.g, fcol.b, 110});
+                            DrawLine3D((Vector3){fx - 1.3f, fy, fz},
+                                       (Vector3){fx + 1.3f, fy, fz}, fcol);
+                            DrawLine3D((Vector3){fx, fy, fz - 1.3f},
+                                       (Vector3){fx, fy, fz + 1.3f}, fcol);
+
+                            Color link = {fcol.r, fcol.g, fcol.b, 60};
+                            for (int i = 0; i < g_bot_count; i++) {
+                                Bot *b = &g_bots[i];
+                                if (!b->active || b->script_id != LLM_SCRIPT_IDX) continue;
+                                DrawLine3D((Vector3){b->x, fy, b->z}, fc, link);
+                            }
+                        }
+                    }
+
                     /* Projectiles.
                      * NOTE: rlSetLineWidth() only calls glLineWidth(); it does
                      * NOT flush the deferred line batch. DrawLine3D vertices are
@@ -1881,7 +1970,7 @@ int main(void) {
 
                 /* HUD */
                 const char *ctrl_hint =
-                    "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  C reset cam  T scan  F full  R deploy  ESC quit";
+                    "WASD/LMB-drag pan  RMB orbit  wheel/Q/E zoom  Z/X height  C reset cam  T inspect  F full  R deploy  ESC quit";
                 DrawText(ctrl_hint, 10, 10, 20, RAYWHITE);
 
                 int hud_top = 34;

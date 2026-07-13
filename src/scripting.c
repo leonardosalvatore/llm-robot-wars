@@ -235,6 +235,32 @@ void scripting_reset_team_mem(void) {
     PyGILState_Release(gs);
 }
 
+bool scripting_team_focus(int script_id, float *x, float *z) {
+    if (script_id < 0 || script_id >= TOTAL_SCRIPTS) return false;
+    if (!Py_IsInitialized()) return false;
+
+    bool ok = false;
+    PyGILState_STATE gs = PyGILState_Ensure();
+    PyObject *d = g_team_mem[script_id];
+    if (d && PyDict_Check(d)) {
+        PyObject *px = PyDict_GetItemString(d, "focus_x"); /* borrowed */
+        PyObject *pz = PyDict_GetItemString(d, "focus_z"); /* borrowed */
+        if (px && pz) {
+            double vx = PyFloat_AsDouble(px);
+            double vz = PyFloat_AsDouble(pz);
+            if (!PyErr_Occurred()) {
+                if (x) *x = (float)vx;
+                if (z) *z = (float)vz;
+                ok = true;
+            } else {
+                PyErr_Clear();
+            }
+        }
+    }
+    PyGILState_Release(gs);
+    return ok;
+}
+
 /* -------------------------------------------------------------------------
  * Python API callbacks
  * ------------------------------------------------------------------------- */

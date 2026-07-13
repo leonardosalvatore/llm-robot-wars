@@ -52,6 +52,22 @@ teammates. The `EXAMPLES / COOKBOOK` block at the bottom of `scripts/bot_llm.py`
 carries reference patterns (steer-to-center, teammate separation, shared focus
 fire, role split) that the model reuses on each regeneration.
 
+## Inspect overlay (press T)
+
+Press **T** during a match to toggle an inspect overlay that renders what the
+robots are "thinking" straight onto the battlefield:
+
+- **Movement-intent arrow** — a cyan arrow from each bot showing the direction
+  it is trying to drive (faint while holding position).
+- **Turret aim ray + target ring** — an amber ray along the turret heading; when
+  it lines up with a scanned enemy, that enemy gets a ground ring so you can see
+  exactly who the bot is shooting at.
+- **Team focus-fire marker** — a pulsing ring/crosshair at the shared
+  `team_mem` focus target for the LLM team, with faint links from every living
+  LLM bot to it, visualising how the swarm concentrates fire.
+- **Scan lines** — the raw `scan()` hits (enemies and walls), dimmed so the
+  cues above stay readable.
+
 One line for reset, build and executing.
 
 ```bash

@@ -42,6 +42,12 @@ PyObject *scripting_team_mem(int script_id);
  * not leak from one match into the next. */
 void scripting_reset_team_mem(void);
 
+/* Read a team's shared focus-fire target from its team_mem blackboard, using
+ * the conventional keys "focus_x" / "focus_z". Returns true and fills *x,*z
+ * when both keys exist and are numeric; false otherwise. Used by the T inspect
+ * overlay to visualise team coordination. Handles the GIL internally. */
+bool scripting_team_focus(int script_id, float *x, float *z);
+
 /* Check Python syntax of a script file without executing it.
  * Returns true if syntax is OK; false and writes error into err_buf otherwise. */
 bool scripting_check_syntax_file(const char *path, char *err_buf, int err_size);
