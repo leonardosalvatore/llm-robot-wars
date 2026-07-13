@@ -181,17 +181,31 @@ static void extract_python(const char *response, char *out, int out_size) {
 /* ----------------------------------------------------------------------- */
 /* Smoke-test harness — creates an isolated Python namespace, injects stub
  * move/fire/fire_weapon/scan, runs init() + 60 frames of think() with 4
- * orbiting enemies, and verifies at least one fire call aimed within 30°.
+ * orbiting enemies, and verifies the bot actually fights: it must aim fire
+ * calls at an enemy on a minimum fraction of frames (not just once) and must
+ * only fire weapon indices it actually mounted in init().
  * Operates entirely on the source STRING — no file I/O — so callers can
  * validate before writing to disk. */
 
 #define SMOKE_NUM_ENEMIES 4
 #define SMOKE_AIM_COS     0.866   /* cos(30 deg) */
 
+/* Fraction of simulated frames on which the script must land at least one
+ * fire/fire_weapon call aimed within 30 deg of a visible enemy. Enemies are
+ * visible and in range every frame of the smoke run, so a bot that fires when
+ * it has a target (as the API recommends) clears this easily; a bot that only
+ * fires in a rare branch (e.g. low-HP panic) does not. */
+#define SMOKE_MIN_FIRE_FRAC  0.60
+
 typedef struct {
     int    fire_calls_total;
     int    fire_at_enemy[SMOKE_NUM_ENEMIES];
     int    enemies_targeted_mask;
+    int    weapon_count;            /* weapons the engine will build from init() */
+    int    bad_weapon_calls;        /* fire_weapon() with out-of-range index */
+    int    last_bad_weapon_index;   /* most recent offending index, for the msg */
+    int    aimed_fire_frames;       /* frames with >=1 aimed-at-enemy fire call */
+    bool   frame_aimed_fire;        /* set by smoke_record_fire within a frame */
     double bot_x, bot_z;
     double enemy_x[SMOKE_NUM_ENEMIES];
     double enemy_z[SMOKE_NUM_ENEMIES];
@@ -215,6 +229,7 @@ static void smoke_record_fire(double dx, double dz) {
         if (cosang >= SMOKE_AIM_COS) {
             g_smoke.fire_at_enemy[i]++;
             g_smoke.enemies_targeted_mask |= (1 << i);
+            g_smoke.frame_aimed_fire = true;
         }
     }
 }
@@ -236,6 +251,14 @@ static PyObject *py_smoke_fire_weapon(PyObject *s, PyObject *args) {
     int    w;
     double dx, dz;
     if (!PyArg_ParseTuple(args, "idd", &w, &dx, &dz)) return NULL;
+    /* Mirror try_fire_weapon(): an out-of-range index spawns no projectile.
+     * Do NOT record it as a fire so the combat/fire-rate checks below treat it
+     * as the wasted, no-op call it will be in the real engine. */
+    if (w < 0 || w >= g_smoke.weapon_count) {
+        g_smoke.bad_weapon_calls++;
+        g_smoke.last_bad_weapon_index = w;
+        Py_RETURN_NONE;
+    }
     smoke_record_fire(dx, dz);
     Py_RETURN_NONE;
 }
@@ -339,6 +362,48 @@ static void fetch_py_error(char *buf, int size) {
     Py_XDECREF(exc_tb);
 }
 
+/* Mirror parse_mount() in src/scripting.c: unknown/missing mount => "left"(0).
+ * Returns the 0..4 mount index for a weapon-entry dict. */
+static int smoke_parse_mount(PyObject *wdict) {
+    PyObject *v = PyDict_GetItemString(wdict, "mount");   /* borrowed */
+    if (!v || !PyUnicode_Check(v)) return 0;
+    const char *sname = PyUnicode_AsUTF8(v);
+    if (!sname) return 0;
+    if (strcmp(sname, "left")      == 0) return 0;
+    if (strcmp(sname, "right")     == 0) return 1;
+    if (strcmp(sname, "top")       == 0) return 2;
+    if (strcmp(sname, "top_front") == 0) return 3;
+    if (strcmp(sname, "top_rear")  == 0) return 4;
+    return 0;
+}
+
+/* Compute how many weapons the engine will actually build from an init() cfg
+ * dict, mirroring scripting_call_init() in src/scripting.c so fire_weapon()
+ * indices can be validated against the same count the runtime will use:
+ *   - no "weapons" list            => default 2 (2x AutoCannon)
+ *   - a list, capped to MAX_WEAPONS(4); mount collisions overwrite (no count++)
+ *   - a list that yields 0 valid   => fallback to default 2
+ * (locomotion/body do not affect the count, so they are ignored here.) */
+static int smoke_count_weapons(PyObject *cfg) {
+    PyObject *weapons_list = PyDict_GetItemString(cfg, "weapons");   /* borrowed */
+    if (!weapons_list || !PyList_Check(weapons_list))
+        return 2;
+
+    Py_ssize_t n = PyList_Size(weapons_list);
+    if (n > 4) n = 4;   /* MAX_WEAPONS */
+
+    int  count = 0;
+    bool mount_used[5] = { false, false, false, false, false };
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject *w = PyList_GetItem(weapons_list, i);   /* borrowed */
+        if (!w || !PyDict_Check(w)) continue;
+        int m = smoke_parse_mount(w);
+        if (m < 0 || m > 4) m = 0;
+        if (!mount_used[m]) { mount_used[m] = true; count++; }
+    }
+    return count > 0 ? count : 2;
+}
+
 /* Run the full smoke test on an in-memory Python source string.
  * This is the core validation; no file I/O happens here. */
 static bool smoke_test_source(const char *source, char *err, int err_size) {
@@ -407,6 +472,9 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
         PyGILState_Release(gs);
         return false;
     }
+    /* How many weapons the engine will actually mount — used to validate any
+     * fire_weapon(i, ...) indices during the combat sim below. */
+    int weapon_count = smoke_count_weapons(cfg);
     Py_DECREF(cfg);
 
     PyObject *think_fn = PyDict_GetItemString(ns, "think");
@@ -419,6 +487,7 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
 
     /* Stage 3: 60-frame combat simulation — hp starts full, drops to 10% halfway */
     smoke_init_arena();
+    g_smoke.weapon_count = weapon_count;   /* set AFTER arena memset clears it */
     const int    FRAMES  = 60;
     const double DT      = 0.05;
     const double FULL_HP = 250.0;
@@ -436,6 +505,7 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
             PyGILState_Release(gs);
             return false;
         }
+        g_smoke.frame_aimed_fire = false;
         PyObject *ret = PyObject_CallFunction(think_fn, "d", DT);
         if (!ret) {
             char py_err[480];
@@ -448,12 +518,32 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
             return false;
         }
         Py_DECREF(ret);
+        if (g_smoke.frame_aimed_fire) g_smoke.aimed_fire_frames++;
     }
 
     Py_DECREF(ns);
     PyGILState_Release(gs);
 
     /* Stage 4: combat report */
+
+    /* 4a: fire_weapon() index validation. init() built weapon_count weapons
+     * (valid indices 0..weapon_count-1); any other index spawns no projectile
+     * in the real engine, so those "shots" are silently lost. */
+    if (g_smoke.bad_weapon_calls > 0) {
+        snprintf(err, (size_t)err_size,
+                 "smoke test weapon check: the script called fire_weapon() with an "
+                 "out-of-range index %d time(s) (e.g. index %d) but init() only "
+                 "mounts %d weapon(s), so valid indices are 0..%d. Those calls fire "
+                 "NOTHING in the engine (try_fire_weapon drops them). Either add the "
+                 "missing weapon(s) to init()'s \"weapons\" list, or only call "
+                 "fire_weapon(i, dx, dz) with i in 0..%d (or use fire(dx,dz) to fire "
+                 "all mounted weapons).",
+                 g_smoke.bad_weapon_calls, g_smoke.last_bad_weapon_index,
+                 g_smoke.weapon_count, g_smoke.weapon_count - 1,
+                 g_smoke.weapon_count - 1);
+        return false;
+    }
+
     if (g_smoke.enemies_targeted_mask == 0) {
         snprintf(err, (size_t)err_size,
                  "smoke test combat report: in 3.0s of simulation with 4 enemies "
@@ -468,12 +558,35 @@ static bool smoke_test_source(const char *source, char *err, int err_size) {
         return false;
     }
 
+    /* 4b: minimum fire rate. Enemies are visible and in range EVERY frame, so a
+     * bot that fires when it has a target should aim at one on nearly every
+     * frame. Requiring a solid fraction rejects bots that only fire in a rare
+     * branch (e.g. low-HP panic) yet slipped past the single-shot check above. */
+    int min_fire_frames = (int)(FRAMES * SMOKE_MIN_FIRE_FRAC);
+    if (g_smoke.aimed_fire_frames < min_fire_frames) {
+        snprintf(err, (size_t)err_size,
+                 "smoke test fire-rate check: an enemy was visible and in range on "
+                 "all %d frames, but the script aimed a fire/fire_weapon call within "
+                 "30 degrees of an enemy on only %d frame(s) (need at least %d, "
+                 "~%d%%). The bot barely shoots and will look idle in real matches. "
+                 "In think(), pick the nearest enemy from scan(0) (t[\"team\"] != "
+                 "self_team) and call fire(t[\"x\"] - self_x, t[\"z\"] - self_z) EVERY "
+                 "frame it is in range — do not gate firing on a rare condition "
+                 "(low HP, exact alignment, etc.). fire() is cooldown-limited by the "
+                 "engine, so calling it every frame is safe.",
+                 FRAMES, g_smoke.aimed_fire_frames, min_fire_frames,
+                 (int)(SMOKE_MIN_FIRE_FRAC * 100.0));
+        return false;
+    }
+
     int hit_count = 0;
     for (int i = 0; i < SMOKE_NUM_ENEMIES; i++)
         if (g_smoke.enemies_targeted_mask & (1 << i)) hit_count++;
     llm_bot_log(LLOG_OK,
-                ">> smoke combat: aimed at %d/%d enemies, %d fire calls",
-                hit_count, SMOKE_NUM_ENEMIES, g_smoke.fire_calls_total);
+                ">> smoke combat: aimed at %d/%d enemies, %d fire calls, "
+                "aimed on %d/%d frames",
+                hit_count, SMOKE_NUM_ENEMIES, g_smoke.fire_calls_total,
+                g_smoke.aimed_fire_frames, FRAMES);
     err[0] = '\0';
     return true;
 }
@@ -767,8 +880,17 @@ static void build_system_prompt(char *dst, int dst_size) {
         "and place 4 enemies at distance ~3.5u in the four cardinal directions\n"
         "(front +x, back -x, left +z, right -z) moving tangentially at varied speeds.\n"
         "self_hp is full for the first 1.5s and 10%% for the second 1.5s.\n"
-        "The script PASSES only if at least ONE fire/fire_weapon call is aimed\n"
-        "within 30 degrees of any enemy. To pass with zero ambiguity:\n"
+        "The enemies are visible and in range on EVERY frame. To PASS, the script must:\n"
+        "  1. aim a fire/fire_weapon call within 30 degrees of an enemy on at least\n"
+        "     60%% of the 60 frames (NOT just once) — so fire EVERY frame you have a\n"
+        "     target; do not gate firing on low HP, exact alignment, or other rare\n"
+        "     conditions. fire() is cooldown-limited by the engine, so firing every\n"
+        "     frame is safe and is the recommended pattern.\n"
+        "  2. only call fire_weapon(i, dx, dz) with i in 0..(weapon_count-1), i.e. a\n"
+        "     valid index into the \"weapons\" list you returned from init(). Firing a\n"
+        "     weapon index you did not mount spawns NOTHING and fails validation.\n"
+        "     If unsure, use fire(dx, dz) which fires ALL mounted weapons.\n"
+        "To pass with zero ambiguity:\n"
         "  - in think(), call targets = scan(0)\n"
         "  - find any entry where t[\"type\"] == \"bot\" and t[\"team\"] != self_team\n"
         "  - call fire(t[\"x\"] - self_x, t[\"z\"] - self_z) every frame an enemy is in range\n"
