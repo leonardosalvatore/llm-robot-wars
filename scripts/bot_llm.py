@@ -1,5 +1,20 @@
+# bot_llm.py — Live-edited by the LLM between matches.
+#
+# The LLM rewrites this file using the system prompt + the previous match
+# telemetry. The COOKBOOK block at the BOTTOM of this file is reference
+# material the LLM is asked to KEEP VERBATIM on every regeneration so that
+# the next iteration always has a working set of Python patterns to copy.
+#
+# Active strategy (coordinated):
+#   wheels + flat body + 2x AutoCannon (left/right) + 2x Laser (top_front/top_rear).
+#   Bots steer toward the arena centre (never hug the border), keep spacing from
+#   teammates, and CONCENTRATE FIRE on one shared enemy chosen via team_mem.
+#   Even self_id push in (attack); odd self_id kite at range (defence). When
+#   self_hp drops below 30% they fall back toward centre and keep firing.
+
 import math
 import random
+
 
 def init():
     return {
@@ -13,12 +28,14 @@ def init():
         ],
     }
 
+
 # IMPORTANT: module-level code runs once when the engine loads the script.
 # At that moment self_x / self_z / self_team / self_hp do NOT exist yet.
 # Never read them here. Seeding with random (no fixed seed) is fine.
 LOW_HP_FRAC = 0.30
 _panic_angle = random.uniform(0, math.pi * 2)
 _panic_timer = 0.0
+
 
 def _wall_avoid(targets):
     ax, az = 0.0, 0.0
@@ -31,6 +48,7 @@ def _wall_avoid(targets):
             az += dz / (d * d)
     return ax, az
 
+
 def _nearest_enemy(targets):
     best, best_d = None, float("inf")
     for t in targets:
@@ -39,6 +57,7 @@ def _nearest_enemy(targets):
             best = t
     return best
 
+
 def _steer_to_center():
     # Pull toward (0,0), stronger the closer we are to the arena border.
     hx = max(arena_half_x, 1.0)
@@ -46,6 +65,7 @@ def _steer_to_center():
     fx = self_x / hx  # -1 (edge) .. 0 (centre) .. 1 (edge)
     fz = self_z / hz
     return -fx * abs(fx) * 2.0, -fz * abs(fz) * 2.0
+
 
 def _separation(targets):
     # Push away from nearby teammates so the swarm does not clump.
@@ -58,6 +78,7 @@ def _separation(targets):
             sx += dx / (d * d)
             sz += dz / (d * d)
     return sx, sz
+
 
 def _shared_focus(targets, dt):
     # Elect ONE enemy for the whole team via team_mem so fire concentrates.
@@ -73,17 +94,13 @@ def _shared_focus(targets, dt):
         team_mem["focus_d"] = best_d
     return team_mem.get("focus_x"), team_mem.get("focus_z")
 
+
 def think(dt):
     global _panic_angle, _panic_timer
 
     _panic_timer -= dt
 
     targets = scan(0)
-    if not targets:
-        _panic_timer = 1.0
-        move(_panic_angle, 0)
-        return
-
     ax, az = _wall_avoid(targets)
     cx, cz = _steer_to_center()
     sx, sz = _separation(targets)
@@ -116,6 +133,7 @@ def think(dt):
         move(math.cos(_panic_angle) + ax + cx + sx,
              math.sin(_panic_angle) + az + cz + sz)
 
+
 # ============================================================================
 # EXAMPLES / COOKBOOK  —  KEEP THIS WHOLE COMMENT BLOCK VERBATIM ON EVERY
 # REGENERATION. The LLM uses it as a working reference. Copy patterns from
@@ -131,8 +149,8 @@ def think(dt):
 #         "locomotion": "wheels",
 #         "body": "flat",
 #         "weapons": [
-#             {"type": "MachineGun", "mount": "left"},
-#             {"type": "MachineGun", "mount": "right"},
+#             {"type": "AutoCannon", "mount": "left"},
+#             {"type": "AutoCannon", "mount": "right"},
 #             {"type": "AutoCannon", "mount": "top_front"},
 #             {"type": "AutoCannon", "mount": "top_rear"},
 #         ],
@@ -155,3 +173,5 @@ def think(dt):
 #    The LLM bot can see all teams, so compare with != self_team (NOT == 6).
 # ----------------------------------------------------------------------------
 # def _nearest_enemy(targets):
+#     best, best_d = None, float("inf")
+#     for

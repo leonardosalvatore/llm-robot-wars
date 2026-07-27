@@ -1192,29 +1192,58 @@ typedef struct {
     char llm_load_error[512];
 } MatchState;
 
+/* One spawn pad per team, clustered on each side of the arena (opponents left,
+ * LLM right). Bots deploy and respawn around their team's pad. */
+static Vector3 g_spawn_pads[TOTAL_SCRIPTS];
+
+static void compute_spawn_pads(float arena_half_x, float arena_half_z) {
+    float pad_x   = arena_half_x * 0.72f;
+    int   n_left  = TOTAL_SCRIPTS - 1;   /* non-LLM teams 0..5 */
+    for (int s = 0; s < TOTAL_SCRIPTS; s++) {
+        float x, z;
+        if (s == LLM_SCRIPT_IDX) {
+            x = pad_x;
+            z = 0.0f;
+        } else {
+            x = -pad_x;
+            float t = (n_left > 1) ? (float)s / (float)(n_left - 1) : 0.5f;
+            z = -arena_half_z * 0.7f + t * (arena_half_z * 1.4f);
+        }
+        g_spawn_pads[s] = (Vector3){ x, 0.0f, z };
+    }
+}
+
+/* Pick a spawn position near team `s`'s pad that clears walls. */
+static void spawn_pos_for_team(int s, float arena_half_x, float arena_half_z,
+                               float *ox, float *oz) {
+    Vector3 pad = g_spawn_pads[s];
+    float x = pad.x, z = pad.z;
+    for (int tries = 0; tries < 60; tries++) {
+        float ang = randf(0.0f, 2.0f * PI);
+        float rad = randf(0.0f, 2.4f);
+        x = pad.x + cosf(ang) * rad;
+        z = pad.z + sinf(ang) * rad;
+        if (x < -arena_half_x + 0.5f) x = -arena_half_x + 0.5f;
+        if (x >  arena_half_x - 0.5f) x =  arena_half_x - 0.5f;
+        if (z < -arena_half_z + 0.5f) z = -arena_half_z + 0.5f;
+        if (z >  arena_half_z - 0.5f) z =  arena_half_z - 0.5f;
+        if (walls_safe_spawn(x, z, 1.0f))
+            break;
+    }
+    *ox = x; *oz = z;
+}
+
 static void respawn_team(int script_idx, const GameConfig *gcfg,
                          float arena_half_x, float arena_half_z)
 {
+    (void)gcfg;
     for (int i = 0; i < g_bot_count; i++) {
         Bot *bot = &g_bots[i];
         if (bot->script_id != script_idx) continue;
         if (bot->active) continue;
 
         float x, z;
-        int tries = 0;
-        do {
-            if (gcfg->opposite_corners) {
-                if (script_idx == LLM_SCRIPT_IDX)
-                    x = randf(arena_half_x * 0.5f, arena_half_x - 0.5f);
-                else
-                    x = randf(-arena_half_x + 0.5f, -arena_half_x * 0.5f);
-                z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
-            } else {
-                x = randf(-arena_half_x + 0.5f, arena_half_x - 0.5f);
-                z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
-            }
-            tries++;
-        } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
+        spawn_pos_for_team(script_idx, arena_half_x, arena_half_z, &x, &z);
 
         PyObject *ns = scripting_load(script_paths[script_idx]);
         BotConfig cfg;
@@ -1279,6 +1308,7 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
     update_set_arena(arena_half_x, arena_half_z);
     walls_generate(arena_half_x, arena_half_z, gcfg->num_walls, gcfg->wall_size, wall_seed);
     walls_add_border(arena_half_x, arena_half_z);
+    compute_spawn_pads(arena_half_x, arena_half_z);
     scripting_init();
 
     ms->llm_load_error[0] = '\0';
@@ -1295,21 +1325,7 @@ static void match_setup(MatchState *ms, const GameConfig *gcfg,
             if (g_bot_count >= MAX_BOTS) break;
 
             float x, z;
-            int tries = 0;
-            do {
-                if (gcfg->opposite_corners) {
-                    if (s == LLM_SCRIPT_IDX) {
-                        x = randf(arena_half_x * 0.5f, arena_half_x - 0.5f);
-                    } else {
-                        x = randf(-arena_half_x + 0.5f, -arena_half_x * 0.5f);
-                    }
-                    z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
-                } else {
-                    x = randf(-arena_half_x + 0.5f, arena_half_x - 0.5f);
-                    z = randf(-arena_half_z + 0.5f, arena_half_z - 0.5f);
-                }
-                tries++;
-            } while (!walls_safe_spawn(x, z, 1.0f) && tries < 200);
+            spawn_pos_for_team(s, arena_half_x, arena_half_z, &x, &z);
 
             PyObject *ns = scripting_load(script_paths[s]);
             if (!ns && s == LLM_SCRIPT_IDX && ms->llm_load_error[0] == '\0') {
@@ -1782,6 +1798,21 @@ int main(void) {
                                          ? g_colors.border_wire
                                          : g_colors.wall_wire;
                             draw_wall_tapered_wires(wcx, wcy, wcz, ww, wh, wd, 0.2f, wire);
+                        }
+                    }
+
+                    /* Spawn pads: a pulsing double ring per active team, tinted
+                     * with the team colour, on the ground at each team's pad. */
+                    {
+                        float pulse = 0.85f + 0.20f * sinf((float)GetTime() * 3.0f);
+                        for (int s = 0; s < TOTAL_SCRIPTS; s++) {
+                            if (ms.spawn_count[s] <= 0) continue;
+                            Vector3 c = g_spawn_pads[s];
+                            c.y += 0.05f;
+                            Color pc = g_colors.team[s];
+                            DrawCircle3D(c, 2.2f * pulse, (Vector3){1,0,0}, 90.0f, pc);
+                            DrawCircle3D(c, 1.4f, (Vector3){1,0,0}, 90.0f,
+                                         (Color){pc.r, pc.g, pc.b, 130});
                         }
                     }
 
